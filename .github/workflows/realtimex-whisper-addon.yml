@@ -225,6 +225,11 @@ jobs:
         working-directory: ${{ env.ADDON_DIR }}
         shell: pwsh
         run: |
+          $windowsRc = Join-Path $env:UniversalCRTSdkDir "bin\$env:UCRTVersion\x64\rc.exe"
+          if (!(Test-Path $windowsRc)) {
+            throw "Missing Windows SDK resource compiler at $windowsRc"
+          }
+
           $cmakeJsArgs = @(
             "cmake-js",
             "rebuild",
@@ -233,6 +238,7 @@ jobs:
             "--runtime-version=$env:ELECTRON_RUNTIME_VERSION",
             "--generator=Ninja",
             "--",
+            "-DCMAKE_RC_COMPILER=$windowsRc",
             "-DGGML_VULKAN=ON"
           )
           npx @cmakeJsArgs
