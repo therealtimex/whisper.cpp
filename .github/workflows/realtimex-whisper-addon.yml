@@ -230,6 +230,22 @@ jobs:
           }
           $env:RC = $windowsRc
 
+          if ("${{ matrix.node_arch }}" -eq "arm64") {
+            npx cmake-js install `
+              --arch=arm64 `
+              --runtime=electron `
+              --runtime-version="$env:ELECTRON_RUNTIME_VERSION"
+            if ($LASTEXITCODE -ne 0) {
+              throw "cmake-js install failed with exit code $LASTEXITCODE"
+            }
+
+            $distDir = Join-Path $env:USERPROFILE ".cmake-js\electron-arm64\v$env:ELECTRON_RUNTIME_VERSION"
+            $nodeLib = Join-Path $distDir "node.lib"
+            $nodeLibUrl = "https://artifacts.electronjs.org/headers/dist/v$env:ELECTRON_RUNTIME_VERSION/arm64/node.lib"
+            Invoke-WebRequest -Uri $nodeLibUrl -OutFile $nodeLib
+            dumpbin /headers $nodeLib | Select-String -Pattern "machine"
+          }
+
           $cmakeJsArgs = @(
             "cmake-js",
             "rebuild",
