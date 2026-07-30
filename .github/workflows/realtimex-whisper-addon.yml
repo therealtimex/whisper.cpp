@@ -136,11 +136,19 @@ jobs:
           cmake --version
           xcodebuild -version
 
+      - name: Setup MSVC command prompt
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Verify Windows build tools
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           cmake --version
+          ninja --version
+          cl
 
       - name: Verify runner architecture
         if: runner.os != 'Windows'
@@ -202,6 +210,7 @@ jobs:
             --arch=${{ matrix.node_arch }} `
             --runtime=electron `
             --runtime-version="$env:ELECTRON_RUNTIME_VERSION" `
+            -G "Ninja" `
             -- `
             -DGGML_VULKAN=ON
           if (!(Test-Path "build\Release\whisper_addon.node")) {

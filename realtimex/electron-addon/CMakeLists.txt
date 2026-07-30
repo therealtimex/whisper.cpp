@@ -65,10 +65,11 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
         ${WHISPER_ROOT}/ggml/src/ggml-cpu/arch/x86/quants.c
         ${WHISPER_ROOT}/ggml/src/ggml-cpu/arch/x86/repack.cpp
     )
-    # Enable AVX optimizations for Intel Mac
     add_definitions(-DGGML_AVX -DGGML_AVX2 -DGGML_F16C -DGGML_FMA)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx -mavx2 -mf16c -mfma")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mavx -mavx2 -mf16c -mfma")
+    if(NOT MSVC)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx -mavx2 -mf16c -mfma")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mavx -mavx2 -mf16c -mfma")
+    endif()
 endif()
 
 # Arch-specific sources for ARM64 (Apple Silicon)
