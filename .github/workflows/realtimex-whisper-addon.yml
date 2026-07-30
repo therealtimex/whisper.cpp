@@ -81,6 +81,12 @@ jobs:
             asset_arch: x64
             node_arch: x64
             runner: windows-2022
+            msvc_arch: x64
+          - asset_os: win
+            asset_arch: arm64
+            node_arch: arm64
+            runner: windows-11-arm
+            msvc_arch: arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     env:
@@ -140,7 +146,7 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: x64
+          arch: ${{ matrix.msvc_arch }}
 
       - name: Verify Windows build tools
         if: runner.os == 'Windows'
@@ -149,6 +155,19 @@ jobs:
           cmake --version
           ninja --version
           cl
+
+      - name: Verify Windows runner architecture
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $actualArch = switch ($env:PROCESSOR_ARCHITECTURE) {
+            "AMD64" { "x64" }
+            "ARM64" { "arm64" }
+            default { $env:PROCESSOR_ARCHITECTURE }
+          }
+          if ($actualArch -ne "${{ matrix.asset_arch }}") {
+            throw "Runner architecture mismatch: expected ${{ matrix.asset_arch }}, got $actualArch ($env:PROCESSOR_ARCHITECTURE)"
+          }
 
       - name: Verify runner architecture
         if: runner.os != 'Windows'
