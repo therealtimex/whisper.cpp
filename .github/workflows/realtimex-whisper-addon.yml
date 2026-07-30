@@ -216,8 +216,7 @@ jobs:
             --arch=${{ matrix.node_arch }} \
             --runtime=electron \
             --runtime-version="${ELECTRON_RUNTIME_VERSION}" \
-            -- \
-            -DGGML_VULKAN=ON
+            --CD=GGML_VULKAN=ON
           test -f build/Release/whisper_addon.node
 
       - name: Build whisper_addon.node
@@ -229,6 +228,7 @@ jobs:
           if (!(Test-Path $windowsRc)) {
             throw "Missing Windows SDK resource compiler at $windowsRc"
           }
+          $env:RC = $windowsRc
 
           $cmakeJsArgs = @(
             "cmake-js",
@@ -237,9 +237,8 @@ jobs:
             "--runtime=electron",
             "--runtime-version=$env:ELECTRON_RUNTIME_VERSION",
             "--generator=Ninja",
-            "--",
-            "-DCMAKE_RC_COMPILER=$windowsRc",
-            "-DGGML_VULKAN=ON"
+            "--CD=CMAKE_RC_COMPILER=$windowsRc",
+            "--CD=GGML_VULKAN=ON"
           )
           npx @cmakeJsArgs
           if ($LASTEXITCODE -ne 0) {
