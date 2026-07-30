@@ -1,0 +1,14 @@
+{
+  "private": true,
+  "name": "@realtimex/whisper-electron-addon-build",
+  "version": "0.0.0",
+  "scripts": {
+    "build": "cmake-js rebuild"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.5.0"
+  },
+  "devDependencies": {
+    "cmake-js": "^7.3.0"
+  }
+}

@@ -1,0 +1,341 @@
+name: RealTimeX Whisper Electron Addon
+run-name: RealTimeX Whisper Addon ${{ inputs.upstream_ref || 'latest-upstream' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "ggml-org/whisper.cpp tag, branch, or SHA. Empty uses the latest upstream release."
+        required: false
+        default: ""
+        type: string
+      release_tag:
+        description: "Release tag to publish addon assets to"
+        required: false
+        default: "realtimex-whisper-addon"
+        type: string
+      publish:
+        description: "Create/update the release and upload assets"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: realtimex-whisper-addon-${{ inputs.upstream_ref || 'latest-upstream' }}-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-upstream:
+    name: Resolve upstream
+    runs-on: ubuntu-22.04
+    outputs:
+      upstream_ref: ${{ steps.resolve.outputs.upstream_ref }}
+      upstream_sha: ${{ steps.resolve.outputs.upstream_sha }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+    steps:
+      - name: Resolve upstream ref
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RAW_UPSTREAM_REF: ${{ inputs.upstream_ref }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          upstream_ref="$(printf '%s' "${RAW_UPSTREAM_REF}" | tr -d '[:space:]')"
+          if [ -z "$upstream_ref" ]; then
+            upstream_ref="$(gh api repos/ggml-org/whisper.cpp/releases/latest --jq '.tag_name')"
+          fi
+          upstream_sha="$(gh api "repos/ggml-org/whisper.cpp/commits/${upstream_ref}" --jq '.sha')"
+          echo "upstream_ref=${upstream_ref}" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Resolved ggml-org/whisper.cpp ${upstream_ref} -> ${upstream_sha}"
+
+  build:
+    name: Build ${{ matrix.asset_os }}-${{ matrix.asset_arch }}
+    needs: resolve-upstream
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset_os: mac
+            asset_arch: x64
+            node_arch: x64
+            runner: macos-13
+          - asset_os: mac
+            asset_arch: arm64
+            node_arch: arm64
+            runner: macos-14
+          - asset_os: linux
+            asset_arch: x64
+            node_arch: x64
+            runner: ubuntu-22.04
+          - asset_os: linux
+            asset_arch: arm64
+            node_arch: arm64
+            runner: ubuntu-24.04-arm
+          - asset_os: win
+            asset_arch: x64
+            node_arch: x64
+            runner: windows-2022
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      ELECTRON_RUNTIME_VERSION: ${{ vars.REALTIMEX_ELECTRON_RUNTIME_VERSION || '41.0.3' }}
+      ADDON_DIR: whisper-src/realtimex/electron-addon
+    steps:
+      - name: Checkout upstream whisper.cpp source
+        uses: actions/checkout@v4
+        with:
+          repository: ggml-org/whisper.cpp
+          ref: ${{ needs.resolve-upstream.outputs.upstream_sha }}
+          path: whisper-src
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout RealTimeX addon harness
+        uses: actions/checkout@v4
+        with:
+          path: packaging
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            realtimex
+          sparse-checkout-cone-mode: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.16.0"
+
+      - name: Validate Electron runtime version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! [[ "${ELECTRON_RUNTIME_VERSION}" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
+            echo "Invalid ELECTRON_RUNTIME_VERSION: ${ELECTRON_RUNTIME_VERSION}"
+            echo "Set repository variable REALTIMEX_ELECTRON_RUNTIME_VERSION, for example 41.0.3."
+            exit 1
+          fi
+          echo "Using Electron runtime version ${ELECTRON_RUNTIME_VERSION}"
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build
+
+      - name: Verify macOS build tools
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          cmake --version
+          xcodebuild -version
+
+      - name: Verify Windows build tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake --version
+
+      - name: Verify runner architecture
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          machine="$(uname -m)"
+          case "$machine" in
+            x86_64|amd64) actual_arch="x64" ;;
+            arm64|aarch64) actual_arch="arm64" ;;
+            *) actual_arch="$machine" ;;
+          esac
+          if [ "$actual_arch" != "${{ matrix.asset_arch }}" ]; then
+            echo "Runner architecture mismatch: expected ${{ matrix.asset_arch }}, got $actual_arch ($machine)"
+            exit 1
+          fi
+
+      - name: Install addon harness
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          rm -rf whisper-src/realtimex
+          mkdir -p whisper-src/realtimex
+          cp -R packaging/realtimex/electron-addon whisper-src/realtimex/electron-addon
+
+      - name: Install addon harness
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (Test-Path "whisper-src\realtimex") {
+            Remove-Item -Path "whisper-src\realtimex" -Recurse -Force
+          }
+          New-Item -Path "whisper-src\realtimex" -ItemType Directory -Force | Out-Null
+          Copy-Item -Path "packaging\realtimex\electron-addon" -Destination "whisper-src\realtimex\electron-addon" -Recurse -Force
+
+      - name: Install addon build dependencies
+        working-directory: ${{ env.ADDON_DIR }}
+        run: |
+          npm install --no-save cmake-js@7.3.0 node-addon-api electron@${{ env.ELECTRON_RUNTIME_VERSION }}
+
+      - name: Build whisper_addon.node
+        if: runner.os != 'Windows'
+        working-directory: ${{ env.ADDON_DIR }}
+        run: |
+          set -euo pipefail
+          npx cmake-js rebuild \
+            --arch=${{ matrix.node_arch }} \
+            --runtime=electron \
+            --runtime-version="${ELECTRON_RUNTIME_VERSION}" \
+            -- \
+            -DGGML_VULKAN=ON
+          test -f build/Release/whisper_addon.node
+
+      - name: Build whisper_addon.node
+        if: runner.os == 'Windows'
+        working-directory: ${{ env.ADDON_DIR }}
+        shell: pwsh
+        run: |
+          npx cmake-js rebuild `
+            --arch=${{ matrix.node_arch }} `
+            --runtime=electron `
+            --runtime-version="$env:ELECTRON_RUNTIME_VERSION" `
+            -- `
+            -DGGML_VULKAN=ON
+          if (!(Test-Path "build\Release\whisper_addon.node")) {
+            throw "Missing build\Release\whisper_addon.node"
+          }
+
+      - name: Package addon
+        working-directory: ${{ env.ADDON_DIR }}
+        shell: python
+        run: |
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import platform
+          import zipfile
+
+          electron_version = os.environ["ELECTRON_RUNTIME_VERSION"]
+          asset_name = "whisper-addon-${{ matrix.asset_os }}-${{ matrix.asset_arch }}-electron-" + electron_version + ".zip"
+          addon = pathlib.Path("build/Release/whisper_addon.node")
+          if not addon.exists():
+              raise SystemExit("missing build/Release/whisper_addon.node")
+
+          dist = pathlib.Path("realtimex-dist")
+          dist.mkdir(exist_ok=True)
+          asset = dist / asset_name
+          digest = hashlib.sha256(addon.read_bytes()).hexdigest()
+          metadata = {
+              "asset": asset_name,
+              "electronRuntimeVersion": electron_version,
+              "platform": "${{ matrix.asset_os }}",
+              "arch": "${{ matrix.asset_arch }}",
+              "nodeArch": "${{ matrix.node_arch }}",
+              "upstreamRepository": "ggml-org/whisper.cpp",
+              "upstreamRef": "${{ needs.resolve-upstream.outputs.upstream_ref }}",
+              "upstreamSha": "${{ needs.resolve-upstream.outputs.upstream_sha }}",
+              "packagingRepository": "${{ github.repository }}",
+              "packagingSha": "${{ github.sha }}",
+              "runnerOs": platform.system(),
+              "sha256": digest,
+          }
+
+          with zipfile.ZipFile(asset, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+              archive.write(addon, "whisper_addon.node")
+              archive.writestr("_realtimexWhisperAddonMetadata.json", json.dumps(metadata, indent=2) + "\n")
+
+          print(f"Packaged {asset}")
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: whisper-addon-${{ matrix.asset_os }}-${{ matrix.asset_arch }}
+          path: ${{ env.ADDON_DIR }}/realtimex-dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish release assets
+    needs:
+      - resolve-upstream
+      - build
+    if: inputs.publish
+    runs-on: ubuntu-22.04
+    env:
+      RELEASE_TAG: ${{ needs.resolve-upstream.outputs.release_tag }}
+      ELECTRON_RUNTIME_VERSION: ${{ vars.REALTIMEX_ELECTRON_RUNTIME_VERSION || '41.0.3' }}
+    steps:
+      - name: Download addon artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: whisper-addon-*
+          merge-multiple: true
+
+      - name: Build release manifest
+        shell: python
+        run: |
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import zipfile
+
+          artifacts = pathlib.Path("artifacts")
+          assets = []
+          for asset in sorted(artifacts.glob("whisper-addon-*.zip")):
+              digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+              metadata = {}
+              with zipfile.ZipFile(asset) as archive:
+                  if "_realtimexWhisperAddonMetadata.json" in archive.namelist():
+                      metadata = json.loads(archive.read("_realtimexWhisperAddonMetadata.json"))
+              assets.append({
+                  "name": asset.name,
+                  "size": asset.stat().st_size,
+                  "sha256": digest,
+                  "metadata": metadata,
+              })
+
+          manifest = {
+              "releaseTag": os.environ["RELEASE_TAG"],
+              "electronRuntimeVersion": os.environ["ELECTRON_RUNTIME_VERSION"],
+              "upstreamRepository": "ggml-org/whisper.cpp",
+              "upstreamRef": "${{ needs.resolve-upstream.outputs.upstream_ref }}",
+              "upstreamSha": "${{ needs.resolve-upstream.outputs.upstream_sha }}",
+              "packagingRepository": "${{ github.repository }}",
+              "packagingSha": "${{ github.sha }}",
+              "assets": assets,
+          }
+          (artifacts / "whisper-addon-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          notes="$(mktemp)"
+          {
+            echo "# RealTimeX Whisper Electron Addon"
+            echo ""
+            echo "- Electron runtime: \`${ELECTRON_RUNTIME_VERSION}\`"
+            echo "- Upstream: \`ggml-org/whisper.cpp@${{ needs.resolve-upstream.outputs.upstream_ref }}\`"
+            echo "- Upstream SHA: \`${{ needs.resolve-upstream.outputs.upstream_sha }}\`"
+            echo "- Packaging SHA: \`${GITHUB_SHA}\`"
+            echo ""
+            echo "Assets are consumed by RealTimeX GitLab release builds as \`whisper_addon.node\`."
+          } > "$notes"
+
+          if gh release view "${RELEASE_TAG}" --repo "${REPO}" >/dev/null 2>&1; then
+            gh release edit "${RELEASE_TAG}" --repo "${REPO}" --notes-file "$notes"
+          else
+            gh release create "${RELEASE_TAG}" --repo "${REPO}" --title "RealTimeX Whisper Addon" --notes-file "$notes"
+          fi
+
+          gh release upload "${RELEASE_TAG}" artifacts/*.zip artifacts/whisper-addon-manifest.json \
+            --repo "${REPO}" \
+            --clobber

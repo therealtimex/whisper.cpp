@@ -1,0 +1,128 @@
+name: RealTimeX Watch Upstream
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+    inputs:
+      dispatch_promote:
+        description: "Dispatch realtimex-whisper-addon when upstream changed"
+        required: false
+        default: true
+        type: boolean
+      force_ref:
+        description: "Optional upstream tag, branch, or SHA instead of latest release"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: realtimex-watch-upstream
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: realtimex-whisper-addon
+
+jobs:
+  watch:
+    name: Check upstream whisper.cpp
+    runs-on: ubuntu-22.04
+    env:
+      ELECTRON_RUNTIME_VERSION: ${{ vars.REALTIMEX_ELECTRON_RUNTIME_VERSION || '41.0.3' }}
+    steps:
+      - name: Compare upstream and promoted addon
+        id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          FORCE_REF: ${{ inputs.force_ref }}
+        run: |
+          set -euo pipefail
+          upstream_ref="$(printf '%s' "${FORCE_REF:-}" | tr -d '[:space:]')"
+          if [ -z "$upstream_ref" ]; then
+            upstream_ref="$(gh api repos/ggml-org/whisper.cpp/releases/latest --jq '.tag_name')"
+          fi
+          upstream_sha="$(gh api "repos/ggml-org/whisper.cpp/commits/${upstream_ref}" --jq '.sha')"
+
+          promoted_sha=""
+          promoted_electron=""
+          release_exists=false
+          mkdir -p current-release
+          if gh release view "${RELEASE_TAG}" --repo "${REPO}" >/dev/null 2>&1; then
+            release_exists=true
+            if gh release download "${RELEASE_TAG}" \
+              --repo "${REPO}" \
+              --pattern whisper-addon-manifest.json \
+              --dir current-release >/dev/null 2>&1; then
+              promoted_sha="$(jq -r '.upstreamSha // ""' current-release/whisper-addon-manifest.json)"
+              promoted_electron="$(jq -r '.electronRuntimeVersion // ""' current-release/whisper-addon-manifest.json)"
+            fi
+          fi
+
+          should_dispatch=false
+          reason="already-current"
+          if [ "$release_exists" != "true" ]; then
+            should_dispatch=true
+            reason="release-missing"
+          elif [ -z "$promoted_sha" ]; then
+            should_dispatch=true
+            reason="manifest-missing"
+          elif [ "$promoted_sha" != "$upstream_sha" ]; then
+            should_dispatch=true
+            reason="upstream-changed"
+          elif [ "$promoted_electron" != "$ELECTRON_RUNTIME_VERSION" ]; then
+            should_dispatch=true
+            reason="electron-version-changed"
+          fi
+
+          active="$(gh run list --repo "${REPO}" \
+            --workflow realtimex-whisper-addon.yml \
+            --limit 20 \
+            --json displayTitle,status \
+            --jq ".[] | select(.status != \"completed\") | .status" | head -n 1)"
+          if [ -n "$active" ]; then
+            should_dispatch=false
+            reason="promoter-already-${active}"
+          fi
+
+          echo "upstream_ref=${upstream_ref}" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
+          echo "promoted_sha=${promoted_sha}" >> "$GITHUB_OUTPUT"
+          echo "promoted_electron=${promoted_electron}" >> "$GITHUB_OUTPUT"
+          echo "should_dispatch=${should_dispatch}" >> "$GITHUB_OUTPUT"
+          echo "reason=${reason}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## RealTimeX watch upstream"
+            echo ""
+            echo "- Upstream ref: \`${upstream_ref}\`"
+            echo "- Upstream SHA: \`${upstream_sha}\`"
+            echo "- Promoted SHA: \`${promoted_sha:-none}\`"
+            echo "- Electron runtime: \`${ELECTRON_RUNTIME_VERSION}\`"
+            echo "- Promoted Electron runtime: \`${promoted_electron:-none}\`"
+            echo "- Dispatch: \`${should_dispatch}\`"
+            echo "- Reason: \`${reason}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Dispatch promoter
+        if: steps.compare.outputs.should_dispatch == 'true' && (github.event_name == 'schedule' || inputs.dispatch_promote)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          UPSTREAM_REF: ${{ steps.compare.outputs.upstream_ref }}
+        run: |
+          set -euo pipefail
+          gh workflow run realtimex-whisper-addon.yml \
+            --repo "${REPO}" \
+            -f "upstream_ref=${UPSTREAM_REF}" \
+            -f "release_tag=${RELEASE_TAG}" \
+            -f "publish=true"
+
+          {
+            echo ""
+            echo "Dispatched \`realtimex-whisper-addon.yml\` for \`${UPSTREAM_REF}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
