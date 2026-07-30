@@ -225,16 +225,26 @@ jobs:
         working-directory: ${{ env.ADDON_DIR }}
         shell: pwsh
         run: |
-          npx cmake-js rebuild `
-            --arch=${{ matrix.node_arch }} `
-            --runtime=electron `
-            --runtime-version="$env:ELECTRON_RUNTIME_VERSION" `
-            -G "Ninja" `
-            -- `
-            -DGGML_VULKAN=ON
-          if (!(Test-Path "build\Release\whisper_addon.node")) {
-            throw "Missing build\Release\whisper_addon.node"
+          $cmakeJsArgs = @(
+            "cmake-js",
+            "rebuild",
+            "--arch=${{ matrix.node_arch }}",
+            "--runtime=electron",
+            "--runtime-version=$env:ELECTRON_RUNTIME_VERSION",
+            "--generator=Ninja",
+            "--",
+            "-DGGML_VULKAN=ON"
+          )
+          npx @cmakeJsArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "cmake-js rebuild failed with exit code $LASTEXITCODE"
           }
+
+          $addon = Get-ChildItem -Path "build" -Recurse -Filter "whisper_addon.node" | Select-Object -First 1
+          if (!$addon) {
+            throw "Missing whisper_addon.node under build"
+          }
+          Write-Host "Built $($addon.FullName)"
 
       - name: Package addon
         working-directory: ${{ env.ADDON_DIR }}
