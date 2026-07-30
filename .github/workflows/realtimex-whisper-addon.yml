@@ -64,7 +64,7 @@ jobs:
           - asset_os: mac
             asset_arch: x64
             node_arch: x64
-            runner: macos-13
+            runner: macos-15-intel
           - asset_os: mac
             asset_arch: arm64
             node_arch: arm64
