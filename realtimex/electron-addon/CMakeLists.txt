@@ -45,6 +45,7 @@ set(WHISPER_ADDON_SOURCES
     ${WHISPER_ROOT}/ggml/src/ggml-backend.cpp
     ${WHISPER_ROOT}/ggml/src/ggml-backend-reg.cpp
     ${WHISPER_ROOT}/ggml/src/ggml-backend-dl.cpp
+    ${WHISPER_ROOT}/ggml/src/ggml-backend-meta.cpp
     ${WHISPER_ROOT}/ggml/src/ggml-opt.cpp
     ${WHISPER_ROOT}/ggml/src/ggml-threading.cpp
     ${WHISPER_ROOT}/ggml/src/ggml-quants.c
@@ -165,6 +166,7 @@ if(WIN32)
     set_target_properties(whisper_addon PROPERTIES
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
     )
+    target_link_libraries(whisper_addon delayimp)
 endif()
 
 # Linux specific settings
