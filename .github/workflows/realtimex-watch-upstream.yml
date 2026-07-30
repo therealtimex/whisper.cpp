@@ -24,9 +24,6 @@ concurrency:
   group: realtimex-watch-upstream
   cancel-in-progress: false
 
-env:
-  RELEASE_TAG: realtimex-whisper-addon
-
 jobs:
   watch:
     name: Check upstream whisper.cpp
@@ -47,14 +44,16 @@ jobs:
             upstream_ref="$(gh api repos/ggml-org/whisper.cpp/releases/latest --jq '.tag_name')"
           fi
           upstream_sha="$(gh api "repos/ggml-org/whisper.cpp/commits/${upstream_ref}" --jq '.sha')"
+          safe_upstream_ref="$(printf '%s' "$upstream_ref" | tr '/:@' '---')"
+          release_tag="realtimex-${safe_upstream_ref}"
 
           promoted_sha=""
           promoted_electron=""
           release_exists=false
           mkdir -p current-release
-          if gh release view "${RELEASE_TAG}" --repo "${REPO}" >/dev/null 2>&1; then
+          if gh release view "${release_tag}" --repo "${REPO}" >/dev/null 2>&1; then
             release_exists=true
-            if gh release download "${RELEASE_TAG}" \
+            if gh release download "${release_tag}" \
               --repo "${REPO}" \
               --pattern whisper-addon-manifest.json \
               --dir current-release >/dev/null 2>&1; then
@@ -91,6 +90,7 @@ jobs:
 
           echo "upstream_ref=${upstream_ref}" >> "$GITHUB_OUTPUT"
           echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
           echo "promoted_sha=${promoted_sha}" >> "$GITHUB_OUTPUT"
           echo "promoted_electron=${promoted_electron}" >> "$GITHUB_OUTPUT"
           echo "should_dispatch=${should_dispatch}" >> "$GITHUB_OUTPUT"
@@ -101,6 +101,7 @@ jobs:
             echo ""
             echo "- Upstream ref: \`${upstream_ref}\`"
             echo "- Upstream SHA: \`${upstream_sha}\`"
+            echo "- Release tag: \`${release_tag}\`"
             echo "- Promoted SHA: \`${promoted_sha:-none}\`"
             echo "- Electron runtime: \`${ELECTRON_RUNTIME_VERSION}\`"
             echo "- Promoted Electron runtime: \`${promoted_electron:-none}\`"
@@ -114,6 +115,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           UPSTREAM_REF: ${{ steps.compare.outputs.upstream_ref }}
+          RELEASE_TAG: ${{ steps.compare.outputs.release_tag }}
         run: |
           set -euo pipefail
           gh workflow run realtimex-whisper-addon.yml \

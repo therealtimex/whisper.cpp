@@ -10,9 +10,9 @@ on:
         default: ""
         type: string
       release_tag:
-        description: "Release tag to publish addon assets to"
+        description: "Release tag to publish addon assets to. Empty uses realtimex-{upstream_ref}."
         required: false
-        default: "realtimex-whisper-addon"
+        default: ""
         type: string
       publish:
         description: "Create/update the release and upload assets"
@@ -41,7 +41,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RAW_UPSTREAM_REF: ${{ inputs.upstream_ref }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
+          RAW_RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
           upstream_ref="$(printf '%s' "${RAW_UPSTREAM_REF}" | tr -d '[:space:]')"
@@ -49,10 +49,15 @@ jobs:
             upstream_ref="$(gh api repos/ggml-org/whisper.cpp/releases/latest --jq '.tag_name')"
           fi
           upstream_sha="$(gh api "repos/ggml-org/whisper.cpp/commits/${upstream_ref}" --jq '.sha')"
+          release_tag="$(printf '%s' "${RAW_RELEASE_TAG}" | tr -d '[:space:]')"
+          if [ -z "$release_tag" ]; then
+            safe_upstream_ref="$(printf '%s' "$upstream_ref" | tr '/:@' '---')"
+            release_tag="realtimex-${safe_upstream_ref}"
+          fi
           echo "upstream_ref=${upstream_ref}" >> "$GITHUB_OUTPUT"
           echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
-          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
-          echo "Resolved ggml-org/whisper.cpp ${upstream_ref} -> ${upstream_sha}"
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "Resolved ggml-org/whisper.cpp ${upstream_ref} -> ${upstream_sha}; release ${release_tag}"
 
   build:
     name: Build ${{ matrix.asset_os }}-${{ matrix.asset_arch }}
@@ -379,8 +384,9 @@ jobs:
         run: |
           set -euo pipefail
           notes="$(mktemp)"
+          release_title="RealTimeX Whisper Addon ${{ needs.resolve-upstream.outputs.release_tag }}"
           {
-            echo "# RealTimeX Whisper Electron Addon"
+            echo "# ${release_title}"
             echo ""
             echo "- Electron runtime: \`${ELECTRON_RUNTIME_VERSION}\`"
             echo "- Upstream: \`ggml-org/whisper.cpp@${{ needs.resolve-upstream.outputs.upstream_ref }}\`"
@@ -391,9 +397,9 @@ jobs:
           } > "$notes"
 
           if gh release view "${RELEASE_TAG}" --repo "${REPO}" >/dev/null 2>&1; then
-            gh release edit "${RELEASE_TAG}" --repo "${REPO}" --notes-file "$notes"
+            gh release edit "${RELEASE_TAG}" --repo "${REPO}" --title "${release_title}" --notes-file "$notes" --latest
           else
-            gh release create "${RELEASE_TAG}" --repo "${REPO}" --title "RealTimeX Whisper Addon" --notes-file "$notes"
+            gh release create "${RELEASE_TAG}" --repo "${REPO}" --title "${release_title}" --notes-file "$notes" --latest
           fi
 
           gh release upload "${RELEASE_TAG}" artifacts/*.zip artifacts/whisper-addon-manifest.json \
