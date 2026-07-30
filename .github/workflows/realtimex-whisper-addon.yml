@@ -264,9 +264,10 @@ jobs:
 
           electron_version = os.environ["ELECTRON_RUNTIME_VERSION"]
           asset_name = "whisper-addon-${{ matrix.asset_os }}-${{ matrix.asset_arch }}-electron-" + electron_version + ".zip"
-          addon = pathlib.Path("build/Release/whisper_addon.node")
-          if not addon.exists():
-              raise SystemExit("missing build/Release/whisper_addon.node")
+          addon_matches = sorted(pathlib.Path("build").glob("**/whisper_addon.node"))
+          if not addon_matches:
+              raise SystemExit("missing whisper_addon.node under build")
+          addon = addon_matches[0]
 
           dist = pathlib.Path("realtimex-dist")
           dist.mkdir(exist_ok=True)
