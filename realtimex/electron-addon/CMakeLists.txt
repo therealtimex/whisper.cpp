@@ -1,272 +1,81 @@
 cmake_minimum_required(VERSION 3.15)
-project(whisper_addon)
+project(whisper_addon C CXX)
 
-# Use C++17
+# The RealTimeX Electron addon around upstream whisper.cpp. whisper and ggml are built by
+# upstream's own CMake (static, linked into the addon), so new or moved upstream sources
+# (e.g. ggml-metal's kernels/ in v1.9.5) need no change here.
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-# Essential for building Node.js addons
-set(CMAKE_BUILD_TYPE Release)
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(WHISPER_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 
-# Node.js addon setup
-include_directories(${CMAKE_JS_INC})
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/node_modules/node-addon-api)
+if(MSVC)
+    # Static runtime everywhere (addon, whisper, ggml) for portability.
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
-# Whisper.cpp includes
-include_directories(
-    ${WHISPER_ROOT}/include
-    ${WHISPER_ROOT}
-    ${WHISPER_ROOT}/ggml/include
-    ${WHISPER_ROOT}/ggml/src
-    ${WHISPER_ROOT}/ggml/src/ggml-cpu
-    ${WHISPER_ROOT}/ggml/src/ggml-metal
-)
+# Upstream build options.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+set(GGML_NATIVE OFF CACHE BOOL "" FORCE)        # portable binaries, not tuned to the build machine
+set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)    # backends linked in, not loaded at runtime
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|x64")
+    set(GGML_AVX ON CACHE BOOL "" FORCE)
+    set(GGML_AVX2 ON CACHE BOOL "" FORCE)
+    set(GGML_F16C ON CACHE BOOL "" FORCE)
+    set(GGML_FMA ON CACHE BOOL "" FORCE)
+endif()
+if(APPLE)
+    set(GGML_METAL ON CACHE BOOL "" FORCE)
+    set(GGML_METAL_EMBED_LIBRARY ON CACHE BOOL "" FORCE)
+    set(GGML_ACCELERATE ON CACHE BOOL "" FORCE)
+    set(GGML_VULKAN OFF CACHE BOOL "" FORCE)    # Vulkan is Windows/Linux only (opt-in: -DGGML_VULKAN=ON)
+endif()
 
-# GGML and Whisper definitions
-add_definitions(
-    -DNAPI_DISABLE_CPP_EXCEPTIONS
-    -DGGML_VERSION="0.0.0"
-    -DGGML_COMMIT="unknown"
-    -DGGML_USE_CPU
-    -DWHISPER_VERSION="1.0.0"
-    -DWHISPER_COMMIT="unknown"
-)
+# Vulkan (Windows/Linux) stays optional, as before: without the Vulkan SDK and glslc on the
+# build machine, build the CPU backend instead of failing.
+if(GGML_VULKAN AND NOT APPLE)
+    find_package(Vulkan COMPONENTS glslc QUIET)
+    if(NOT (Vulkan_FOUND AND Vulkan_GLSLC_EXECUTABLE))
+        message(WARNING "GGML_VULKAN=ON but Vulkan SDK or glslc not found — skipping Vulkan backend")
+        set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+    endif()
+endif()
 
-# Whisper addon sources
-set(WHISPER_ADDON_SOURCES
+add_subdirectory(${WHISPER_ROOT} whisper-build EXCLUDE_FROM_ALL)
+
+add_library(whisper_addon SHARED
     native/whisper_addon.cc
     native/audio_pipeline.cc
-    ${WHISPER_ROOT}/src/whisper.cpp
-    ${WHISPER_ROOT}/ggml/src/ggml.c
-    ${WHISPER_ROOT}/ggml/src/ggml.cpp
-    ${WHISPER_ROOT}/ggml/src/ggml-alloc.c
-    ${WHISPER_ROOT}/ggml/src/ggml-backend.cpp
-    ${WHISPER_ROOT}/ggml/src/ggml-backend-reg.cpp
-    ${WHISPER_ROOT}/ggml/src/ggml-backend-dl.cpp
-    ${WHISPER_ROOT}/ggml/src/ggml-backend-meta.cpp
-    ${WHISPER_ROOT}/ggml/src/ggml-opt.cpp
-    ${WHISPER_ROOT}/ggml/src/ggml-threading.cpp
-    ${WHISPER_ROOT}/ggml/src/ggml-quants.c
-    ${WHISPER_ROOT}/ggml/src/ggml-cpu/ggml-cpu.c
-    ${WHISPER_ROOT}/ggml/src/ggml-cpu/ggml-cpu.cpp
-    ${WHISPER_ROOT}/ggml/src/ggml-cpu/quants.c
-    ${WHISPER_ROOT}/ggml/src/ggml-cpu/vec.cpp
-    ${WHISPER_ROOT}/ggml/src/ggml-cpu/repack.cpp
-    ${WHISPER_ROOT}/ggml/src/ggml-cpu/traits.cpp
-    ${WHISPER_ROOT}/ggml/src/ggml-cpu/ops.cpp
-    ${WHISPER_ROOT}/ggml/src/ggml-cpu/binary-ops.cpp
-    ${WHISPER_ROOT}/ggml/src/ggml-cpu/unary-ops.cpp
+    ${CMAKE_JS_SRC}
 )
-
-# Arch-specific sources for x86
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-    list(APPEND WHISPER_ADDON_SOURCES
-        ${WHISPER_ROOT}/ggml/src/ggml-cpu/arch/x86/quants.c
-        ${WHISPER_ROOT}/ggml/src/ggml-cpu/arch/x86/repack.cpp
-    )
-    add_definitions(-DGGML_AVX -DGGML_AVX2 -DGGML_F16C -DGGML_FMA)
-    if(NOT MSVC)
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx -mavx2 -mf16c -mfma")
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mavx -mavx2 -mf16c -mfma")
-    endif()
-endif()
-
-# Arch-specific sources for ARM64 (Apple Silicon)
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|ARM64")
-    list(APPEND WHISPER_ADDON_SOURCES
-        ${WHISPER_ROOT}/ggml/src/ggml-cpu/arch/arm/quants.c
-        ${WHISPER_ROOT}/ggml/src/ggml-cpu/arch/arm/repack.cpp
-    )
-    # Enable NEON optimizations for Apple Silicon
-    add_definitions(-DGGML_USE_ARM_NEON)
-endif()
-
-# Create the addon
-add_library(whisper_addon SHARED ${WHISPER_ADDON_SOURCES} ${CMAKE_JS_SRC})
 set_target_properties(whisper_addon PROPERTIES PREFIX "" SUFFIX ".node")
+target_include_directories(whisper_addon PRIVATE
+    ${CMAKE_JS_INC}
+    ${CMAKE_CURRENT_SOURCE_DIR}/node_modules/node-addon-api
+)
+target_compile_definitions(whisper_addon PRIVATE NAPI_DISABLE_CPP_EXCEPTIONS)
+target_link_libraries(whisper_addon PRIVATE whisper ${CMAKE_JS_LIB})
 
-# macOS specific settings
 if(APPLE)
-    enable_language(ASM)
-
-    # Enable Accelerate framework (Apple's optimized BLAS/LAPACK)
-    add_definitions(-DGGML_USE_ACCELERATE -DGGML_USE_METAL -DGGML_METAL_EMBED_LIBRARY)
-    find_library(ACCELERATE_FRAMEWORK Accelerate)
-
-    # Metal shader embed
-    set(GGML_METAL_DIR ${WHISPER_ROOT}/ggml/src/ggml-metal)
-    set(GGML_COMMON_H  ${WHISPER_ROOT}/ggml/src/ggml-common.h)
-    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/autogenerated")
-    set(METALLIB_EMBED_ASM        "${CMAKE_CURRENT_BINARY_DIR}/autogenerated/ggml-metal-embed.s")
-    set(METALLIB_SOURCE_EMBED     "${CMAKE_CURRENT_BINARY_DIR}/autogenerated/ggml-metal-embed.metal")
-    set(METALLIB_SOURCE_EMBED_TMP "${CMAKE_CURRENT_BINARY_DIR}/autogenerated/ggml-metal-embed.metal.tmp")
-    add_custom_command(
-        OUTPUT "${METALLIB_EMBED_ASM}"
-        COMMAND sed -e "/__embed_ggml-common.h__/r ${GGML_COMMON_H}"       -e "/__embed_ggml-common.h__/d"         < "${GGML_METAL_DIR}/ggml-metal.metal"          > "${METALLIB_SOURCE_EMBED_TMP}"
-        COMMAND sed -e "/\#include \"ggml-metal-impl.h\"/r ${GGML_METAL_DIR}/ggml-metal-impl.h" -e "/\#include \"ggml-metal-impl.h\"/d" < "${METALLIB_SOURCE_EMBED_TMP}" > "${METALLIB_SOURCE_EMBED}"
-        COMMAND echo ".section __DATA,__ggml_metallib"          >  "${METALLIB_EMBED_ASM}"
-        COMMAND echo ".globl _ggml_metallib_start"              >> "${METALLIB_EMBED_ASM}"
-        COMMAND echo "_ggml_metallib_start:"                    >> "${METALLIB_EMBED_ASM}"
-        COMMAND echo .incbin "\"${METALLIB_SOURCE_EMBED}\""     >> "${METALLIB_EMBED_ASM}"
-        COMMAND echo ".globl _ggml_metallib_end"                >> "${METALLIB_EMBED_ASM}"
-        COMMAND echo "_ggml_metallib_end:"                      >> "${METALLIB_EMBED_ASM}"
-        DEPENDS "${GGML_METAL_DIR}/ggml-metal.metal" "${GGML_METAL_DIR}/ggml-metal-impl.h" "${GGML_COMMON_H}"
-        COMMENT "Generating embedded Metal library"
-        VERBATIM
-    )
-
-    # Metal backend source files
-    target_sources(whisper_addon PRIVATE
-        ${WHISPER_ROOT}/ggml/src/ggml-metal/ggml-metal.cpp
-        ${WHISPER_ROOT}/ggml/src/ggml-metal/ggml-metal-device.m
-        ${WHISPER_ROOT}/ggml/src/ggml-metal/ggml-metal-device.cpp
-        ${WHISPER_ROOT}/ggml/src/ggml-metal/ggml-metal-common.cpp
-        ${WHISPER_ROOT}/ggml/src/ggml-metal/ggml-metal-context.m
-        ${WHISPER_ROOT}/ggml/src/ggml-metal/ggml-metal-ops.cpp
-        ${METALLIB_EMBED_ASM}
-    )
-
-    # Link frameworks
-    find_library(METAL_FRAMEWORK Metal REQUIRED)
-    find_library(METALKIT_FRAMEWORK MetalKit REQUIRED)
-    find_library(FOUNDATION_LIBRARY Foundation REQUIRED)
-    target_link_libraries(whisper_addon ${ACCELERATE_FRAMEWORK} ${METAL_FRAMEWORK} ${METALKIT_FRAMEWORK} ${FOUNDATION_LIBRARY})
-
-    set_target_properties(whisper_addon PROPERTIES
-        LINK_FLAGS "-undefined dynamic_lookup"
-    )
+    set_target_properties(whisper_addon PROPERTIES LINK_FLAGS "-undefined dynamic_lookup")
 endif()
 
-# Windows specific settings
 if(WIN32)
-    # MSVC compiler flags for optimization
-    if(MSVC)
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /O2 /fp:fast")
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /O2 /fp:fast")
-        
-        # Enable AVX2 on x64
-        if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /arch:AVX2")
-            set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /arch:AVX2")
-        endif()
-        
-        # Enable NEON on ARM64 (Surface Pro X, Windows on ARM)
-        if(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64")
-            add_definitions(-DGGML_USE_ARM_NEON)
-            # NEON is always available on ARM64, no /arch flag needed
-        endif()
-        
-        # Disable specific warnings
-        add_definitions(/wd4244 /wd4267 /wd4305)
-    endif()
-    
-    # Link with static runtime for portability
-    set_target_properties(whisper_addon PROPERTIES
-        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
-    )
-    target_link_libraries(whisper_addon delayimp)
+    target_link_libraries(whisper_addon PRIVATE delayimp)
 endif()
 
-# Linux specific settings
 if(UNIX AND NOT APPLE)
-    # Add GNU source definitions for SCHED_BATCH and CPU affinity functions
-    add_definitions(-D_GNU_SOURCE)
-    
-    # GCC/Clang optimization flags
-    # Note: -fno-finite-math-only is REQUIRED by GGML
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -fno-finite-math-only")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -fno-finite-math-only")
-    
-    # Link with math and threading libraries
-    target_link_libraries(whisper_addon m pthread)
-    
-    # Set rpath for finding shared libraries
+    target_compile_definitions(whisper_addon PRIVATE _GNU_SOURCE)
+    target_link_libraries(whisper_addon PRIVATE m pthread)
     set_target_properties(whisper_addon PROPERTIES
         BUILD_WITH_INSTALL_RPATH TRUE
         INSTALL_RPATH "$ORIGIN"
     )
 endif()
-
-# Vulkan GPU support — Windows and Linux only, opt-in via -DGGML_VULKAN=ON
-# Requires: Vulkan SDK with glslc installed on the build machine
-if((WIN32 OR (UNIX AND NOT APPLE)) AND GGML_VULKAN)
-    find_package(Vulkan COMPONENTS glslc)
-    if(Vulkan_FOUND AND Vulkan_GLSLC_EXECUTABLE)
-        message(STATUS "Vulkan found — enabling GPU acceleration")
-        add_definitions(-DGGML_USE_VULKAN)
-
-        include_directories(
-            ${WHISPER_ROOT}/ggml/src/ggml-vulkan
-            ${CMAKE_CURRENT_BINARY_DIR}
-        )
-
-        include(ExternalProject)
-
-        set(VULKAN_SHADERS_SRC ${WHISPER_ROOT}/ggml/src/ggml-vulkan/vulkan-shaders)
-
-        ExternalProject_Add(
-            vulkan-shaders-gen
-            SOURCE_DIR ${VULKAN_SHADERS_SRC}
-            CMAKE_ARGS
-                -DCMAKE_INSTALL_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>
-                -DCMAKE_INSTALL_BINDIR=.
-                -DCMAKE_BUILD_TYPE=$<CONFIG>
-            BUILD_COMMAND ${CMAKE_COMMAND} --build . --config $<CONFIG>
-            BUILD_ALWAYS  TRUE
-            INSTALL_COMMAND ${CMAKE_COMMAND} -E env --unset=DESTDIR
-                            ${CMAKE_COMMAND} --install . --config $<CONFIG>
-        )
-
-        set(_vk_suffix $<IF:$<STREQUAL:${CMAKE_HOST_SYSTEM_NAME},Windows>,.exe,>)
-        set(_vk_genshaders_cmd "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/vulkan-shaders-gen${_vk_suffix}")
-        set(_vk_header     "${CMAKE_CURRENT_BINARY_DIR}/ggml-vulkan-shaders.hpp")
-        set(_vk_input_dir  "${VULKAN_SHADERS_SRC}")
-        set(_vk_output_dir "${CMAKE_CURRENT_BINARY_DIR}/vulkan-shaders.spv")
-
-        file(GLOB _vk_shader_files    CONFIGURE_DEPENDS "${_vk_input_dir}/*.comp")
-        file(GLOB _vk_shadersgen_srcs CONFIGURE_DEPENDS "${_vk_input_dir}/*.cpp" "${_vk_input_dir}/*.h")
-
-        add_custom_command(
-            OUTPUT  ${_vk_header}
-            COMMAND ${_vk_genshaders_cmd}
-                        --output-dir ${_vk_output_dir}
-                        --target-hpp ${_vk_header}
-            DEPENDS ${_vk_shadersgen_srcs} vulkan-shaders-gen
-            COMMENT "Generate Vulkan shaders header"
-        )
-
-        target_sources(whisper_addon PRIVATE
-            ${_vk_header}
-            ${WHISPER_ROOT}/ggml/src/ggml-vulkan/ggml-vulkan.cpp
-        )
-
-        foreach(file_full ${_vk_shader_files})
-            get_filename_component(file ${file_full} NAME)
-            set(_vk_target_cpp "${CMAKE_CURRENT_BINARY_DIR}/${file}.cpp")
-
-            add_custom_command(
-                OUTPUT  ${_vk_target_cpp}
-                DEPFILE ${_vk_target_cpp}.d
-                COMMAND ${_vk_genshaders_cmd}
-                            --glslc      ${Vulkan_GLSLC_EXECUTABLE}
-                            --source     ${file_full}
-                            --output-dir ${_vk_output_dir}
-                            --target-hpp ${_vk_header}
-                            --target-cpp ${_vk_target_cpp}
-                DEPENDS ${file_full} ${_vk_shadersgen_srcs} vulkan-shaders-gen
-                COMMENT "Generate Vulkan shader: ${file}"
-            )
-            target_sources(whisper_addon PRIVATE ${_vk_target_cpp})
-        endforeach()
-
-        target_link_libraries(whisper_addon Vulkan::Vulkan)
-
-    else()
-        message(WARNING "GGML_VULKAN=ON but Vulkan SDK or glslc not found — skipping Vulkan backend")
-    endif()
-endif()
-
-# Link libraries (after adding Accelerate)
-target_link_libraries(whisper_addon ${CMAKE_JS_LIB})
