@@ -164,14 +164,18 @@ class GitHub:
         )
         self.api = api.rstrip("/")
 
-    def _request(self, url: str, accept: str, auth: bool) -> bytes:
-        req = urllib.request.Request(url, headers={
+    def _request(self, url: str, accept: str, auth: bool, method: str = "GET",
+                 body: Optional[Dict[str, Any]] = None) -> bytes:
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method, headers={
             "Accept": accept,
             "User-Agent": "realtimex-whisper-addon-release",
             "X-GitHub-Api-Version": "2022-11-28",
         })
         if auth and self.token:
             req.add_header("Authorization", f"Bearer {self.token}")
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 return resp.read()
@@ -184,6 +188,14 @@ class GitHub:
         if params:
             url += "?" + urllib.parse.urlencode(params)
         return json.loads(self._request(url, "application/vnd.github+json", auth=True))
+
+    def post(self, path: str, body: Dict[str, Any]) -> Any:
+        url = f"{self.api}/{path.lstrip('/')}"
+        return json.loads(self._request(url, "application/vnd.github+json", auth=True, method="POST", body=body))
+
+    def delete(self, path: str) -> None:
+        url = f"{self.api}/{path.lstrip('/')}"
+        self._request(url, "application/vnd.github+json", auth=True, method="DELETE")
 
     def get_or_none(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         try:

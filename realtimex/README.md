@@ -66,12 +66,49 @@ or `gh run rerun <run-id> --failed`). The other platforms' artifacts are reused,
 and the publish job runs once the matrix is green. Do not dispatch a fresh run
 for that: it rebuilds all six platforms.
 
-Hosted Apple Silicon runners are capacity-limited: since 11/2026, jobs on
-`macos-15` (and `macos-26` in the llama.cpp fork) were cancelled with "The job
-was not acquired by Runner of type hosted even after multiple attempts". Set the
-repository variable `REALTIMEX_MAC_ARM64_RUNNER` to a self-hosted runner label
-to build mac-arm64 there. Cross-compiling arm64 on the Intel runner does not
-work as is: the harness picks CPU sources from the host processor.
+### Fallback runner for mac-arm64
+
+Hosted Apple Silicon runners are capacity-limited: since 11/2026, `macos-15`
+jobs here (and `macos-26` in the llama.cpp fork) were often cancelled with "The
+job was not acquired by Runner of type hosted even after multiple attempts".
+GitHub gives up on a hosted job after about 15 minutes; that is the wait before
+the fallback (it can't be shortened per job).
+
+1. `build-mac-arm64` asks for a hosted runner (`macos-15`, or the
+   `mac_arm64_runner` input / `REALTIMEX_MAC_ARM64_RUNNER` variable).
+2. If GitHub cancels it for lack of a runner, `build-mac-arm64-fallback` runs on
+   the self-hosted label in `REALTIMEX_MAC_ARM64_FALLBACK_RUNNER`
+   (`rtx-whisper-mac-arm64`). A real build failure does not fall back. Empty
+   variable = no fallback.
+3. Nothing listens on that label by default: this repository is public, and
+   its owner is a user account, so a self-hosted runner can't be limited to
+   this workflow. Instead the RealTimeX heartbeat on the iMac
+   (`agent-heartbeat/scripts/whisper-release-watch.sh`) books the Mac mini
+   when such a job is queued:
+   - `scripts/book_runner.py` sees the queued job and no runner online, deletes
+     stale single-use registrations, and mints a single-use (JIT) runner
+     configuration that only carries the fallback label;
+   - the heartbeat sends `self-hosted/start-jit-runner.sh` with that
+     configuration over SSH to `rtxqa@` the mini (`macmini-qa`), a non-admin
+     account that can't change the Homebrew tools the GitLab release builds use;
+   - the script refuses while `~rtxqa/QA-LOCK` is held, writes QA-LOCK for the
+     build, runs the runner from `~rtxqa/actions-runner` at lower CPU priority,
+     stops it if no job arrives within 20 minutes (75 minutes overall), and
+     releases only its own lock. The runner takes one job and unregisters.
+4. Publish takes mac-arm64 from whichever job succeeded.
+
+The heartbeat ticks every 15 minutes, so the fallback build starts up to about
+15 minutes after GitHub's cancellation. If the mini stays busy (QA-LOCK) the job
+waits; a queued self-hosted job is cancelled by GitHub after 24 hours.
+
+Token: the heartbeat uses `~/.config/rtx-whisper-runner/token` on the iMac
+(a fine-grained token for this repository only: Administration read/write,
+Actions read), else the `gh` login's token. Only the single-use runner
+configuration reaches the mini.
+
+Mini setup (once, as rtxqa): the GitHub runner is unpacked in
+`~/actions-runner` (actions/runner 2.338.2, `osx-arm64`, sha256 checked). It is
+not configured as a service and holds no registration.
 
 ### Watch upstream: `realtimex-watch-upstream.yml` and the iMac heartbeat
 
@@ -81,7 +118,7 @@ do (`none`, `dispatch`, or `rerun-failed`). Two callers act on it:
 
 | Caller | When | Notes |
 |--------|------|-------|
-| RealTimeX heartbeat on the iMac (agent-heartbeat workspace, task `whisper-cpp-release-watch`, `scripts/whisper-release-watch.sh`) | hourly | GitHub throttles scheduled workflows on forks; the hourly cron once went a month without running |
+| RealTimeX heartbeat on the iMac (agent-heartbeat workspace, task `whisper-cpp-release-watch`, `scripts/whisper-release-watch.sh`) | every 15 minutes | GitHub throttles scheduled workflows on forks; it also books the fallback runner |
 | `realtimex-watch-upstream.yml` | daily cron backstop, or manual | manual runs are dry runs unless `publish=true` |
 
 The watcher:
@@ -120,6 +157,9 @@ GH_TOKEN="$(gh auth token)" python3 realtimex/scripts/watch_upstream.py --force-
 | `scripts/validate_addon.py` | Gate a zip (layout, metadata, CPU, macOS floor, weak Napi exports) |
 | `scripts/smoke_load_addon.py` | Load the zipped addon and list its exports |
 | `scripts/build_manifest.py` | Write `whisper-addon-manifest.json`; require all platforms |
+| `scripts/book_runner.py` | Book a single-use runner for a queued fallback job (`--mint`, `--cleanup`) |
+| `self-hosted/start-jit-runner.sh` | On the mini: run one single-use runner under QA-LOCK |
+| `../.github/actions/build-whisper-addon` | The build, gate and upload steps every build job runs |
 
 ```bash
 python3 -m unittest discover -s realtimex/tests -v
@@ -136,7 +176,8 @@ python3 realtimex/scripts/validate_addon.py \
 |----------|---------|-----|
 | `REALTIMEX_ELECTRON_RUNTIME_VERSION` | `41.0.3` | Electron headers the addon is built against |
 | `REALTIMEX_MACOS_DEPLOYMENT_TARGET` | `13.0` | macOS floor for the build and the gate |
-| `REALTIMEX_MAC_ARM64_RUNNER` | `macos-15` | Runner label for mac-arm64 |
+| `REALTIMEX_MAC_ARM64_RUNNER` | `macos-15` | Runner label for the first mac-arm64 attempt |
+| `REALTIMEX_MAC_ARM64_FALLBACK_RUNNER` | (empty: no fallback) | Self-hosted label for the mac-arm64 fallback, `rtx-whisper-mac-arm64` |
 
 The same shape is used by the llama.cpp fork (`therealtimex/llama.cpp`,
 `realtimex/README.md`): a promote workflow, a watcher, a heartbeat, scripts with
