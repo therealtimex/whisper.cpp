@@ -92,6 +92,11 @@ jobs:
             node_arch: arm64
             runner: windows-11-arm
             msvc_arch: arm64
+            # windows-11-arm is now the windows-11-vs2026-arm64 image (VS 18
+            # only). cmake-js 7.4.0 is the first release whose Visual Studio
+            # finder knows VS 2026; 7.3.0 fails with "unknown version". The
+            # other targets stay on 7.3.0 until they are verified on 7.4.0.
+            cmake_js_version: "7.4.0"
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     env:
@@ -210,7 +215,7 @@ jobs:
       - name: Install addon build dependencies
         working-directory: ${{ env.ADDON_DIR }}
         run: |
-          npm install --no-save cmake-js@7.3.0 node-addon-api electron@${{ env.ELECTRON_RUNTIME_VERSION }}
+          npm install --no-save cmake-js@${{ matrix.cmake_js_version || '7.3.0' }} node-addon-api electron@${{ env.ELECTRON_RUNTIME_VERSION }}
 
       - name: Build whisper_addon.node
         if: runner.os != 'Windows'
