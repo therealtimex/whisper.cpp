@@ -391,7 +391,8 @@ jobs:
           retention-days: 7
 
   publish:
-    name: Publish ${{ needs.resolve-upstream.outputs.release_tag }}
+    # Static: a skipped job shows its name unrendered.
+    name: Publish release
     needs:
       - resolve-upstream
       - build
