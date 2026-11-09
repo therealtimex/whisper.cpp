@@ -159,7 +159,7 @@ GH_TOKEN="$(gh auth token)" python3 realtimex/scripts/watch_upstream.py --force-
 | `scripts/build_manifest.py` | Write `whisper-addon-manifest.json`; require all platforms |
 | `scripts/book_runner.py` | Book a single-use runner for a queued fallback job (`--mint`, `--cleanup`) |
 | `self-hosted/start-jit-runner.sh` | On the mini: run one single-use runner under QA-LOCK |
-| `../.github/actions/build-whisper-addon` | The build, gate and upload steps every build job runs |
+| `../.github/actions/whisper-addon` | The build, gate and upload steps every build job runs |
 
 ```bash
 python3 -m unittest discover -s realtimex/tests -v

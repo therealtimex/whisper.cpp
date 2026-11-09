@@ -187,7 +187,7 @@ jobs:
           sparse-checkout-cone-mode: true
 
       - name: Build, gate and upload
-        uses: ./packaging/.github/actions/build-whisper-addon
+        uses: ./packaging/.github/actions/whisper-addon
         with:
           asset_os: ${{ matrix.asset_os }}
           asset_arch: ${{ matrix.asset_arch }}
@@ -223,7 +223,7 @@ jobs:
           sparse-checkout-cone-mode: true
 
       - name: Build, gate and upload
-        uses: ./packaging/.github/actions/build-whisper-addon
+        uses: ./packaging/.github/actions/whisper-addon
         with:
           asset_os: mac
           asset_arch: arm64
@@ -262,7 +262,7 @@ jobs:
           sparse-checkout-cone-mode: true
 
       - name: Build, gate and upload
-        uses: ./packaging/.github/actions/build-whisper-addon
+        uses: ./packaging/.github/actions/whisper-addon
         with:
           asset_os: mac
           asset_arch: arm64
