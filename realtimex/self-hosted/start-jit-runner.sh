@@ -49,6 +49,11 @@ cat > "${supervisor}" <<'SUPERVISOR'
 set -u
 RUNNER_DIR="$1" LOCK="$2" MARK="$3" IDLE_LIMIT="$4" MAX_TIME="$5" LOG="$6"
 export PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
+# The mini's IPv6 route to some of GitHub's Azure endpoints is broken (IPv6
+# connects to pipelines.actions.githubusercontent.com time out; IPv4 works),
+# and an artifact upload failed with ETIMEDOUT. Node-based actions run with
+# this, so they resolve IPv4 first.
+export NODE_OPTIONS="--dns-result-order=ipv4first"
 release() {
   if [[ -f "${LOCK}" ]] && head -1 "${LOCK}" | grep -qF "${MARK}"; then rm -f "${LOCK}"; fi
 }

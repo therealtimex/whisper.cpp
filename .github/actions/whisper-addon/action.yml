@@ -282,10 +282,29 @@ runs:
           --zip "realtimex-dist/whisper-addon-${{ inputs.asset_os }}-${{ inputs.asset_arch }}-electron-${ELECTRON_RUNTIME_VERSION}.zip" \
           --runtime node
 
+    # Uploads from the self-hosted Mac have timed out (ETIMEDOUT on
+    # CreateArtifact); retry once, as the llama.cpp fork does for its DGX runner.
     - name: Upload workflow artifact
+      id: upload
+      continue-on-error: true
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
         name: whisper-addon-${{ inputs.asset_os }}-${{ inputs.asset_arch }}
         path: realtimex-dist/*.zip
         if-no-files-found: error
         retention-days: 7
+
+    - name: Wait before retrying the upload
+      if: steps.upload.outcome == 'failure'
+      shell: bash
+      run: sleep 20
+
+    - name: Retry workflow artifact upload
+      if: steps.upload.outcome == 'failure'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: whisper-addon-${{ inputs.asset_os }}-${{ inputs.asset_arch }}
+        path: realtimex-dist/*.zip
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: true
