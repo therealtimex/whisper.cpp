@@ -10,6 +10,17 @@ set(CMAKE_BUILD_TYPE Release)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(WHISPER_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 
+# realtimex-ai-app#3229: hidden visibility, so the addon exports only its N-API
+# registration symbols. Exported weak node-addon-api templates are coalesced by
+# dyld with other addons' copies (node-pty's), and a copy without C++ exception
+# handling turns another addon's Napi::Error into an abort. Keep this block
+# identical in realtimex-ai-app frontend/CMakeLists.txt (the from-source path).
+set(CMAKE_C_VISIBILITY_PRESET hidden)
+set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+set(CMAKE_OBJC_VISIBILITY_PRESET hidden)
+set(CMAKE_OBJCXX_VISIBILITY_PRESET hidden)
+set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
+
 # Node.js addon setup
 include_directories(${CMAKE_JS_INC})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/node_modules/node-addon-api)
