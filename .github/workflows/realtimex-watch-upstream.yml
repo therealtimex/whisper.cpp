@@ -1,130 +1,128 @@
+# Watch ggml-org/whisper.cpp and start the RealTimeX whisper addon release.
+#
+# Hourly checks run outside GitHub, from the RealTimeX heartbeat on the iMac
+# (agent-heartbeat workspace, task whisper-cpp-release-watch): GitHub throttles
+# scheduled workflows on forks, and this one once went a month without a
+# scheduled run. This cron is a daily backstop.
+#
+# Both paths run realtimex/scripts/watch_upstream.py, which decides: dispatch a
+# new run, re-run only the failed jobs of the last run (after a backoff), or do
+# nothing. Failed attempts are capped per packaging commit, so a broken build
+# does not retry forever.
+#
+# Off switch: disable this workflow to pause every automatic release,
+# including the heartbeat.
 name: RealTimeX Watch Upstream
 
 on:
   schedule:
-    - cron: "23 * * * *"
+    - cron: "41 6 * * *"
   workflow_dispatch:
     inputs:
-      dispatch_promote:
-        description: "Dispatch realtimex-whisper-addon when upstream changed"
+      act:
+        description: "Start or re-run the release when the watcher says so"
         required: false
         default: true
         type: boolean
+      publish:
+        description: "Let a manual check publish (false: a new run is a dry run and failed publish runs are not re-run)"
+        required: false
+        default: false
+        type: boolean
       force_ref:
-        description: "Optional upstream tag, branch, or SHA instead of latest release"
+        description: "Optional upstream tag, branch, or SHA instead of the latest release"
         required: false
         default: ""
         type: string
+      ignore_backoff:
+        description: "Retry now even if the last failure is recent"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
-  actions: write
+  actions: read
 
 concurrency:
   group: realtimex-watch-upstream
   cancel-in-progress: false
 
+env:
+  PYTHONUNBUFFERED: "1"
+
 jobs:
   watch:
     name: Check upstream whisper.cpp
     runs-on: ubuntu-22.04
-    env:
-      ELECTRON_RUNTIME_VERSION: ${{ vars.REALTIMEX_ELECTRON_RUNTIME_VERSION || '41.0.3' }}
+    outputs:
+      action: ${{ steps.watch.outputs.action }}
+      reason: ${{ steps.watch.outputs.reason }}
+      upstream_ref: ${{ steps.watch.outputs.upstream_ref }}
+      release_tag: ${{ steps.watch.outputs.release_tag }}
+      run_id: ${{ steps.watch.outputs.run_id }}
     steps:
-      - name: Compare upstream and promoted addon
-        id: compare
+      - name: Checkout release scripts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            realtimex
+          sparse-checkout-cone-mode: true
+
+      - name: Compare upstream with the published addon
+        id: watch
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
+          REALTIMEX_ELECTRON_RUNTIME_VERSION: ${{ vars.REALTIMEX_ELECTRON_RUNTIME_VERSION || '41.0.3' }}
           FORCE_REF: ${{ inputs.force_ref }}
+          IGNORE_BACKOFF: ${{ inputs.ignore_backoff }}
         run: |
           set -euo pipefail
-          upstream_ref="$(printf '%s' "${FORCE_REF:-}" | tr -d '[:space:]')"
-          if [ -z "$upstream_ref" ]; then
-            upstream_ref="$(gh api repos/ggml-org/whisper.cpp/releases/latest --jq '.tag_name')"
+          args=(--packaging-repo "${GITHUB_REPOSITORY}" --force-ref "${FORCE_REF:-}" --github-output --json)
+          if [ "${IGNORE_BACKOFF:-false}" = "true" ]; then
+            args+=(--ignore-backoff)
           fi
-          upstream_sha="$(gh api "repos/ggml-org/whisper.cpp/commits/${upstream_ref}" --jq '.sha')"
-          safe_upstream_ref="$(printf '%s' "$upstream_ref" | tr '/:@' '---')"
-          release_tag="realtimex-${safe_upstream_ref}"
+          python3 realtimex/scripts/watch_upstream.py "${args[@]}"
 
-          promoted_sha=""
-          promoted_electron=""
-          release_exists=false
-          mkdir -p current-release
-          if gh release view "${release_tag}" --repo "${REPO}" >/dev/null 2>&1; then
-            release_exists=true
-            if gh release download "${release_tag}" \
-              --repo "${REPO}" \
-              --pattern whisper-addon-manifest.json \
-              --dir current-release >/dev/null 2>&1; then
-              promoted_sha="$(jq -r '.upstreamSha // ""' current-release/whisper-addon-manifest.json)"
-              promoted_electron="$(jq -r '.electronRuntimeVersion // ""' current-release/whisper-addon-manifest.json)"
-            fi
-          fi
-
-          should_dispatch=false
-          reason="already-current"
-          if [ "$release_exists" != "true" ]; then
-            should_dispatch=true
-            reason="release-missing"
-          elif [ -z "$promoted_sha" ]; then
-            should_dispatch=true
-            reason="manifest-missing"
-          elif [ "$promoted_sha" != "$upstream_sha" ]; then
-            should_dispatch=true
-            reason="upstream-changed"
-          elif [ "$promoted_electron" != "$ELECTRON_RUNTIME_VERSION" ]; then
-            should_dispatch=true
-            reason="electron-version-changed"
-          fi
-
-          active="$(gh run list --repo "${REPO}" \
-            --workflow realtimex-whisper-addon.yml \
-            --limit 20 \
-            --json displayTitle,status \
-            --jq ".[] | select(.status != \"completed\") | .status" | head -n 1)"
-          if [ -n "$active" ]; then
-            should_dispatch=false
-            reason="promoter-already-${active}"
-          fi
-
-          echo "upstream_ref=${upstream_ref}" >> "$GITHUB_OUTPUT"
-          echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
-          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
-          echo "promoted_sha=${promoted_sha}" >> "$GITHUB_OUTPUT"
-          echo "promoted_electron=${promoted_electron}" >> "$GITHUB_OUTPUT"
-          echo "should_dispatch=${should_dispatch}" >> "$GITHUB_OUTPUT"
-          echo "reason=${reason}" >> "$GITHUB_OUTPUT"
-
-          {
-            echo "## RealTimeX watch upstream"
-            echo ""
-            echo "- Upstream ref: \`${upstream_ref}\`"
-            echo "- Upstream SHA: \`${upstream_sha}\`"
-            echo "- Release tag: \`${release_tag}\`"
-            echo "- Promoted SHA: \`${promoted_sha:-none}\`"
-            echo "- Electron runtime: \`${ELECTRON_RUNTIME_VERSION}\`"
-            echo "- Promoted Electron runtime: \`${promoted_electron:-none}\`"
-            echo "- Dispatch: \`${should_dispatch}\`"
-            echo "- Reason: \`${reason}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Dispatch promoter
-        if: steps.compare.outputs.should_dispatch == 'true' && (github.event_name == 'schedule' || inputs.dispatch_promote)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          UPSTREAM_REF: ${{ steps.compare.outputs.upstream_ref }}
-          RELEASE_TAG: ${{ steps.compare.outputs.release_tag }}
+  act:
+    name: ${{ needs.watch.outputs.action }} ${{ needs.watch.outputs.release_tag }}
+    needs: watch
+    if: needs.watch.outputs.action != 'none' && (github.event_name == 'schedule' || inputs.act)
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ACTION: ${{ needs.watch.outputs.action }}
+      UPSTREAM_REF: ${{ needs.watch.outputs.upstream_ref }}
+      RELEASE_TAG: ${{ needs.watch.outputs.release_tag }}
+      RUN_ID: ${{ needs.watch.outputs.run_id }}
+      PUBLISH: ${{ github.event_name == 'schedule' || inputs.publish }}
+    steps:
+      - name: Start or re-run the release
         run: |
           set -euo pipefail
-          gh workflow run realtimex-whisper-addon.yml \
-            --repo "${REPO}" \
-            -f "upstream_ref=${UPSTREAM_REF}" \
-            -f "release_tag=${RELEASE_TAG}" \
-            -f "publish=true"
-
-          {
-            echo ""
-            echo "Dispatched \`realtimex-whisper-addon.yml\` for \`${UPSTREAM_REF}\`."
-          } >> "$GITHUB_STEP_SUMMARY"
+          case "${ACTION}" in
+            dispatch)
+              gh workflow run realtimex-whisper-addon.yml \
+                --repo "${GITHUB_REPOSITORY}" \
+                -f "upstream_ref=${UPSTREAM_REF}" \
+                -f "release_tag=${RELEASE_TAG}" \
+                -f "publish=${PUBLISH}"
+              echo "- Dispatched \`${UPSTREAM_REF}\` -> \`${RELEASE_TAG}\` (publish=${PUBLISH})" >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            rerun-failed)
+              if [ "${PUBLISH}" != "true" ]; then
+                echo "- Run ${RUN_ID} publishes; re-run it with publish=true" >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+              gh run rerun "${RUN_ID}" --repo "${GITHUB_REPOSITORY}" --failed
+              echo "- Re-running failed jobs of run ${RUN_ID}" >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              echo "::error::Unknown watcher action '${ACTION}'"
+              exit 1
+              ;;
+          esac

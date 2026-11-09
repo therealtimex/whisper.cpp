@@ -1,5 +1,22 @@
+# RealTimeX: build whisper_addon.node for Electron from a pinned
+# ggml-org/whisper.cpp ref and publish it as the release assets the app
+# downloads (realtimex-ai-app frontend/native/whisper-addon-pin.json).
+#
+# Rules (runbook: realtimex/README.md):
+#   - Manual runs are dry runs unless publish=true.
+#   - A published realtimex-* release is immutable. The app pins releases by
+#     tag alone, so a rebuilt addon gets a new release_tag. The release is
+#     assembled as a draft and published only when every platform is present;
+#     the manifest is uploaded last.
+#   - Every zip passes realtimex/scripts/validate_addon.py (format, CPU, macOS
+#     floor, no exported weak node-addon-api symbols) and loads in Node.
+#   - If one platform fails (for example no hosted macOS arm64 runner), re-run
+#     the failed jobs of the same run: the other platforms' artifacts are
+#     reused. The watcher does this on its own, with backoff.
 name: RealTimeX Whisper Electron Addon
-run-name: RealTimeX Whisper Addon ${{ inputs.upstream_ref || 'latest-upstream' }}
+# realtimex/scripts/addon_release.py run_title() must match this.
+run-name: >-
+  RealTimeX Whisper Addon ${{ inputs.upstream_ref || 'latest-upstream' }}${{ inputs.release_tag && format(' -> {0}', inputs.release_tag) || '' }}${{ !inputs.publish && ' (dry run)' || '' }}
 
 on:
   workflow_dispatch:
@@ -10,22 +27,33 @@ on:
         default: ""
         type: string
       release_tag:
-        description: "Release tag to publish addon assets to. Empty uses realtimex-{upstream_ref}."
+        description: "Release tag to publish to. Empty uses realtimex-{upstream_ref}. Must not be published yet."
         required: false
         default: ""
         type: string
       publish:
-        description: "Create/update the release and upload assets"
+        description: "Publish the release (false = dry run: build, gate and keep the artifacts only)"
         required: false
-        default: true
+        default: false
+        type: boolean
+      mark_latest:
+        description: "Mark the published release as this repository's Latest release"
+        required: false
+        default: false
         type: boolean
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: realtimex-whisper-addon-${{ inputs.upstream_ref || 'latest-upstream' }}-${{ inputs.release_tag }}
+  group: realtimex-whisper-addon-${{ inputs.release_tag || inputs.upstream_ref || 'latest-upstream' }}
   cancel-in-progress: false
+
+env:
+  ELECTRON_RUNTIME_VERSION: ${{ vars.REALTIMEX_ELECTRON_RUNTIME_VERSION || '41.0.3' }}
+  # The app's macOS floor (Electron 44 needs macOS 13).
+  MACOS_DEPLOYMENT_TARGET: ${{ vars.REALTIMEX_MACOS_DEPLOYMENT_TARGET || '13.0' }}
+  PYTHONUNBUFFERED: "1"
 
 jobs:
   resolve-upstream:
@@ -36,6 +64,18 @@ jobs:
       upstream_sha: ${{ steps.resolve.outputs.upstream_sha }}
       release_tag: ${{ steps.resolve.outputs.release_tag }}
     steps:
+      - name: Checkout release scripts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            realtimex
+            .github/workflows
+          sparse-checkout-cone-mode: true
+
+      - name: Test release scripts
+        run: python3 -m unittest discover -s realtimex/tests -v
+
       - name: Resolve upstream ref
         id: resolve
         env:
@@ -44,6 +84,14 @@ jobs:
           RAW_RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
+          if ! [[ "${ELECTRON_RUNTIME_VERSION}" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
+            echo "::error::Invalid ELECTRON_RUNTIME_VERSION '${ELECTRON_RUNTIME_VERSION}'; set the repository variable REALTIMEX_ELECTRON_RUNTIME_VERSION, for example 41.0.3"
+            exit 1
+          fi
+          if ! [[ "${MACOS_DEPLOYMENT_TARGET}" =~ ^[0-9]+[.][0-9]+$ ]]; then
+            echo "::error::Invalid MACOS_DEPLOYMENT_TARGET '${MACOS_DEPLOYMENT_TARGET}'"
+            exit 1
+          fi
           upstream_ref="$(printf '%s' "${RAW_UPSTREAM_REF}" | tr -d '[:space:]')"
           if [ -z "$upstream_ref" ]; then
             upstream_ref="$(gh api repos/ggml-org/whisper.cpp/releases/latest --jq '.tag_name')"
@@ -54,10 +102,31 @@ jobs:
             safe_upstream_ref="$(printf '%s' "$upstream_ref" | tr '/:@' '---')"
             release_tag="realtimex-${safe_upstream_ref}"
           fi
-          echo "upstream_ref=${upstream_ref}" >> "$GITHUB_OUTPUT"
-          echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
-          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          if ! [[ "$release_tag" =~ ^realtimex-[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::Release tag '${release_tag}' must look like realtimex-<name>"
+            exit 1
+          fi
+          {
+            echo "upstream_ref=${upstream_ref}"
+            echo "upstream_sha=${upstream_sha}"
+            echo "release_tag=${release_tag}"
+          } >> "$GITHUB_OUTPUT"
           echo "Resolved ggml-org/whisper.cpp ${upstream_ref} -> ${upstream_sha}; release ${release_tag}"
+
+      - name: Refuse a published release tag
+        # Fail before spending runner time; publish checks again before it writes.
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.resolve.outputs.release_tag }}
+          UPSTREAM_SHA: ${{ steps.resolve.outputs.upstream_sha }}
+        run: |
+          python3 realtimex/scripts/release_state.py \
+            --repo "${GITHUB_REPOSITORY}" \
+            --tag "${RELEASE_TAG}" \
+            --electron-version "${ELECTRON_RUNTIME_VERSION}" \
+            --upstream-sha "${UPSTREAM_SHA}" \
+            --require-assemblable
 
   build:
     name: Build ${{ matrix.asset_os }}-${{ matrix.asset_arch }}
@@ -73,7 +142,10 @@ jobs:
           - asset_os: mac
             asset_arch: arm64
             node_arch: arm64
-            runner: macos-15
+            # Hosted Apple Silicon runners are capacity-limited (jobs cancelled
+            # unacquired since 11/2026). Set REALTIMEX_MAC_ARM64_RUNNER to a
+            # self-hosted runner label to build there instead.
+            runner: ${{ vars.REALTIMEX_MAC_ARM64_RUNNER || 'macos-15' }}
           - asset_os: linux
             asset_arch: x64
             node_arch: x64
@@ -87,19 +159,23 @@ jobs:
             node_arch: x64
             runner: windows-2022
             msvc_arch: x64
+            python: python
           - asset_os: win
             asset_arch: arm64
             node_arch: arm64
             runner: windows-11-arm
             msvc_arch: arm64
+            python: python
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     env:
-      ELECTRON_RUNTIME_VERSION: ${{ vars.REALTIMEX_ELECTRON_RUNTIME_VERSION || '41.0.3' }}
       ADDON_DIR: whisper-src/realtimex/electron-addon
+      PY: ${{ matrix.python || 'python3' }}
+      UPSTREAM_REF: ${{ needs.resolve-upstream.outputs.upstream_ref }}
+      UPSTREAM_SHA: ${{ needs.resolve-upstream.outputs.upstream_sha }}
     steps:
       - name: Checkout upstream whisper.cpp source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: ggml-org/whisper.cpp
           ref: ${{ needs.resolve-upstream.outputs.upstream_sha }}
@@ -108,7 +184,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout RealTimeX addon harness
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           path: packaging
           fetch-depth: 1
@@ -118,20 +194,9 @@ jobs:
           sparse-checkout-cone-mode: true
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22.16.0"
-
-      - name: Validate Electron runtime version
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! [[ "${ELECTRON_RUNTIME_VERSION}" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
-            echo "Invalid ELECTRON_RUNTIME_VERSION: ${ELECTRON_RUNTIME_VERSION}"
-            echo "Set repository variable REALTIMEX_ELECTRON_RUNTIME_VERSION, for example 41.0.3."
-            exit 1
-          fi
-          echo "Using Electron runtime version ${ELECTRON_RUNTIME_VERSION}"
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -149,7 +214,7 @@ jobs:
 
       - name: Setup MSVC command prompt
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         with:
           arch: ${{ matrix.msvc_arch }}
 
@@ -217,11 +282,19 @@ jobs:
         working-directory: ${{ env.ADDON_DIR }}
         run: |
           set -euo pipefail
+          extra=()
+          if [ "${RUNNER_OS}" = "macOS" ]; then
+            # Explicit floor: without it the addon inherits the runner's macOS
+            # version (realtimex-b4938 says minos 15.0; the app supports 13).
+            export MACOSX_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET}"
+            extra+=("--CD=CMAKE_OSX_DEPLOYMENT_TARGET=${MACOS_DEPLOYMENT_TARGET}")
+          fi
           npx cmake-js rebuild \
             --arch=${{ matrix.node_arch }} \
             --runtime=electron \
             --runtime-version="${ELECTRON_RUNTIME_VERSION}" \
-            --CD=GGML_VULKAN=ON
+            --CD=GGML_VULKAN=ON \
+            ${extra[@]+"${extra[@]}"}
           test -f build/Release/whisper_addon.node
 
       - name: Build whisper_addon.node
@@ -273,135 +346,187 @@ jobs:
           Write-Host "Built $($addon.FullName)"
 
       - name: Package addon
-        working-directory: ${{ env.ADDON_DIR }}
-        shell: python
+        shell: bash
         run: |
-          import hashlib
-          import json
-          import os
-          import pathlib
-          import platform
-          import zipfile
+          set -euo pipefail
+          "${PY}" packaging/realtimex/scripts/package_addon.py \
+            --build-dir "${ADDON_DIR}/build" \
+            --out-dir realtimex-dist \
+            --platform "${{ matrix.asset_os }}" \
+            --arch "${{ matrix.asset_arch }}" \
+            --node-arch "${{ matrix.node_arch }}" \
+            --electron-version "${ELECTRON_RUNTIME_VERSION}" \
+            --upstream-ref "${UPSTREAM_REF}" \
+            --upstream-sha "${UPSTREAM_SHA}" \
+            --packaging-repo "${GITHUB_REPOSITORY}" \
+            --packaging-sha "${GITHUB_SHA}" \
+            --macos-deployment-target "${MACOS_DEPLOYMENT_TARGET}"
 
-          electron_version = os.environ["ELECTRON_RUNTIME_VERSION"]
-          asset_name = "whisper-addon-${{ matrix.asset_os }}-${{ matrix.asset_arch }}-electron-" + electron_version + ".zip"
-          addon_matches = sorted(pathlib.Path("build").glob("**/whisper_addon.node"))
-          if not addon_matches:
-              raise SystemExit("missing whisper_addon.node under build")
-          addon = addon_matches[0]
+      - name: Gate packaged addon
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${PY}" packaging/realtimex/scripts/validate_addon.py \
+            --zip "realtimex-dist/whisper-addon-${{ matrix.asset_os }}-${{ matrix.asset_arch }}-electron-${ELECTRON_RUNTIME_VERSION}.zip" \
+            --platform "${{ matrix.asset_os }}" \
+            --arch "${{ matrix.asset_arch }}" \
+            --electron-version "${ELECTRON_RUNTIME_VERSION}" \
+            --upstream-sha "${UPSTREAM_SHA}" \
+            --max-macos-deployment-target "${MACOS_DEPLOYMENT_TARGET}"
 
-          dist = pathlib.Path("realtimex-dist")
-          dist.mkdir(exist_ok=True)
-          asset = dist / asset_name
-          digest = hashlib.sha256(addon.read_bytes()).hexdigest()
-          metadata = {
-              "asset": asset_name,
-              "electronRuntimeVersion": electron_version,
-              "platform": "${{ matrix.asset_os }}",
-              "arch": "${{ matrix.asset_arch }}",
-              "nodeArch": "${{ matrix.node_arch }}",
-              "upstreamRepository": "ggml-org/whisper.cpp",
-              "upstreamRef": "${{ needs.resolve-upstream.outputs.upstream_ref }}",
-              "upstreamSha": "${{ needs.resolve-upstream.outputs.upstream_sha }}",
-              "packagingRepository": "${{ github.repository }}",
-              "packagingSha": "${{ github.sha }}",
-              "runnerOs": platform.system(),
-              "sha256": digest,
-          }
-
-          with zipfile.ZipFile(asset, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-              archive.write(addon, "whisper_addon.node")
-              archive.writestr("_realtimexWhisperAddonMetadata.json", json.dumps(metadata, indent=2) + "\n")
-
-          print(f"Packaged {asset}")
+      - name: Load packaged addon
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${PY}" packaging/realtimex/scripts/smoke_load_addon.py \
+            --zip "realtimex-dist/whisper-addon-${{ matrix.asset_os }}-${{ matrix.asset_arch }}-electron-${ELECTRON_RUNTIME_VERSION}.zip" \
+            --runtime node
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: whisper-addon-${{ matrix.asset_os }}-${{ matrix.asset_arch }}
-          path: ${{ env.ADDON_DIR }}/realtimex-dist/*.zip
+          path: realtimex-dist/*.zip
           if-no-files-found: error
           retention-days: 7
 
   publish:
-    name: Publish release assets
+    name: Publish ${{ needs.resolve-upstream.outputs.release_tag }}
     needs:
       - resolve-upstream
       - build
     if: inputs.publish
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     env:
+      GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ needs.resolve-upstream.outputs.release_tag }}
-      ELECTRON_RUNTIME_VERSION: ${{ vars.REALTIMEX_ELECTRON_RUNTIME_VERSION || '41.0.3' }}
+      UPSTREAM_REF: ${{ needs.resolve-upstream.outputs.upstream_ref }}
+      UPSTREAM_SHA: ${{ needs.resolve-upstream.outputs.upstream_sha }}
+      MARK_LATEST: ${{ inputs.mark_latest }}
     steps:
+      - name: Checkout release scripts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            realtimex
+          sparse-checkout-cone-mode: true
+
       - name: Download addon artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
           pattern: whisper-addon-*
           merge-multiple: true
 
       - name: Build release manifest
-        shell: python
-        run: |
-          import hashlib
-          import json
-          import os
-          import pathlib
-          import zipfile
-
-          artifacts = pathlib.Path("artifacts")
-          assets = []
-          for asset in sorted(artifacts.glob("whisper-addon-*.zip")):
-              digest = hashlib.sha256(asset.read_bytes()).hexdigest()
-              metadata = {}
-              with zipfile.ZipFile(asset) as archive:
-                  if "_realtimexWhisperAddonMetadata.json" in archive.namelist():
-                      metadata = json.loads(archive.read("_realtimexWhisperAddonMetadata.json"))
-              assets.append({
-                  "name": asset.name,
-                  "size": asset.stat().st_size,
-                  "sha256": digest,
-                  "metadata": metadata,
-              })
-
-          manifest = {
-              "releaseTag": os.environ["RELEASE_TAG"],
-              "electronRuntimeVersion": os.environ["ELECTRON_RUNTIME_VERSION"],
-              "upstreamRepository": "ggml-org/whisper.cpp",
-              "upstreamRef": "${{ needs.resolve-upstream.outputs.upstream_ref }}",
-              "upstreamSha": "${{ needs.resolve-upstream.outputs.upstream_sha }}",
-              "packagingRepository": "${{ github.repository }}",
-              "packagingSha": "${{ github.sha }}",
-              "assets": assets,
-          }
-          (artifacts / "whisper-addon-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-
-      - name: Create or update release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          notes="$(mktemp)"
-          release_title="RealTimeX Whisper Addon ${{ needs.resolve-upstream.outputs.release_tag }}"
+          python3 realtimex/scripts/build_manifest.py \
+            --dist-dir artifacts \
+            --release-tag "${RELEASE_TAG}" \
+            --electron-version "${ELECTRON_RUNTIME_VERSION}" \
+            --upstream-ref "${UPSTREAM_REF}" \
+            --upstream-sha "${UPSTREAM_SHA}" \
+            --packaging-repo "${GITHUB_REPOSITORY}" \
+            --packaging-sha "${GITHUB_SHA}" \
+            --require-complete
           {
-            echo "# ${release_title}"
+            echo "## RealTimeX whisper addon ${RELEASE_TAG}"
             echo ""
-            echo "- Electron runtime: \`${ELECTRON_RUNTIME_VERSION}\`"
-            echo "- Upstream: \`ggml-org/whisper.cpp@${{ needs.resolve-upstream.outputs.upstream_ref }}\`"
-            echo "- Upstream SHA: \`${{ needs.resolve-upstream.outputs.upstream_sha }}\`"
-            echo "- Packaging SHA: \`${GITHUB_SHA}\`"
-            echo ""
-            echo "Assets are consumed by RealTimeX GitLab release builds as \`whisper_addon.node\`."
-          } > "$notes"
+            echo '```json'
+            jq '{releaseTag, electronRuntimeVersion, upstreamRef, upstreamSha, packagingSha, complete, assets: [.assets[] | {name, sha256}]}' artifacts/whisper-addon-manifest.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          if gh release view "${RELEASE_TAG}" --repo "${REPO}" >/dev/null 2>&1; then
-            gh release edit "${RELEASE_TAG}" --repo "${REPO}" --title "${release_title}" --notes-file "$notes" --latest
+      - name: Assemble draft release
+        run: |
+          set -euo pipefail
+          # Re-check right before writing: published releases are immutable.
+          state_json="$(python3 realtimex/scripts/release_state.py \
+            --repo "${GITHUB_REPOSITORY}" \
+            --tag "${RELEASE_TAG}" \
+            --electron-version "${ELECTRON_RUNTIME_VERSION}" \
+            --upstream-sha "${UPSTREAM_SHA}" \
+            --require-assemblable)"
+          state="$(jq -r '.state' <<< "$state_json")"
+
+          title="RealTimeX Whisper Addon ${RELEASE_TAG}"
+          notes="$(mktemp)"
+          cat > "$notes" <<EOF
+          # ${title}
+
+          - Electron runtime: \`${ELECTRON_RUNTIME_VERSION}\`
+          - Upstream: [ggml-org/whisper.cpp \`${UPSTREAM_REF}\`](https://github.com/ggml-org/whisper.cpp/tree/${UPSTREAM_SHA}) (\`${UPSTREAM_SHA}\`)
+          - Packaging: [\`${GITHUB_SHA}\`](https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_SHA})
+          - macOS floor: \`${MACOS_DEPLOYMENT_TARGET}\`
+          - Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          Each zip passed \`realtimex/scripts/validate_addon.py\` and loaded in Node.
+          Digests are in \`whisper-addon-manifest.json\`. This release is immutable:
+          rebuilds are published under a new tag. The app picks a release through
+          \`frontend/native/whisper-addon-pin.json\`.
+          EOF
+
+          if [ "$state" = "absent" ]; then
+            gh release create "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --draft \
+              --target "${GITHUB_SHA}" \
+              --title "${title}" \
+              --notes-file "$notes"
           else
-            gh release create "${RELEASE_TAG}" --repo "${REPO}" --title "${release_title}" --notes-file "$notes" --latest
+            # A draft left by an earlier attempt: nobody can download it yet,
+            # so it is safe to reuse and replace its assets.
+            gh release edit "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --target "${GITHUB_SHA}" \
+              --title "${title}" \
+              --notes-file "$notes"
+            keep="$(cd artifacts && ls whisper-addon-*.zip whisper-addon-manifest.json)"
+            gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name' |
+              while IFS= read -r name; do
+                if ! grep -Fxq "$name" <<< "$keep"; then
+                  gh release delete-asset "${RELEASE_TAG}" "$name" --repo "${GITHUB_REPOSITORY}" --yes
+                fi
+              done
           fi
 
-          gh release upload "${RELEASE_TAG}" artifacts/*.zip artifacts/whisper-addon-manifest.json \
-            --repo "${REPO}" \
-            --clobber
+          gh release upload "${RELEASE_TAG}" artifacts/whisper-addon-*.zip \
+            --repo "${GITHUB_REPOSITORY}" --clobber
+          # The manifest goes last, so it never lists a zip that is not there.
+          gh release upload "${RELEASE_TAG}" artifacts/whisper-addon-manifest.json \
+            --repo "${GITHUB_REPOSITORY}" --clobber
+
+          expected="$(jq -r '.expectedAssetNames[]' artifacts/whisper-addon-manifest.json; echo whisper-addon-manifest.json)"
+          actual="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
+          if [ "$(sort <<< "$expected")" != "$(sort <<< "$actual")" ]; then
+            echo "::error::Draft ${RELEASE_TAG} assets do not match the manifest"
+            diff <(sort <<< "$expected") <(sort <<< "$actual") || true
+            exit 1
+          fi
+
+      - name: Publish release
+        run: |
+          set -euo pipefail
+          gh release edit "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --draft=false \
+            --latest="${MARK_LATEST}"
+          for _ in 1 2 3 4 5 6; do
+            if python3 realtimex/scripts/release_state.py \
+                --repo "${GITHUB_REPOSITORY}" \
+                --tag "${RELEASE_TAG}" \
+                --electron-version "${ELECTRON_RUNTIME_VERSION}" \
+                --upstream-sha "${UPSTREAM_SHA}" \
+                --require-complete > release-state.json; then
+              echo "Published ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 10
+          done
+          cat release-state.json
+          echo "::error::${RELEASE_TAG} was published but does not read back as complete"
+          exit 1
