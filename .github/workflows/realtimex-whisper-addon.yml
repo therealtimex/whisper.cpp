@@ -19,6 +19,11 @@ on:
         required: false
         default: true
         type: boolean
+      mac_arm64_runner:
+        description: "runs-on label for the mac-arm64 build. Empty uses the hosted macos-15; a self-hosted label can stand in when hosted macOS arm64 capacity is short."
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -73,7 +78,7 @@ jobs:
           - asset_os: mac
             asset_arch: arm64
             node_arch: arm64
-            runner: macos-15
+            runner: ${{ inputs.mac_arm64_runner || 'macos-15' }}
           - asset_os: linux
             asset_arch: x64
             node_arch: x64
@@ -92,11 +97,19 @@ jobs:
             node_arch: arm64
             runner: windows-11-arm
             msvc_arch: arm64
+            # windows-11-arm is now the windows-11-vs2026-arm64 image (VS 18
+            # only). cmake-js 7.4.0 is the first release whose Visual Studio
+            # finder knows VS 2026; 7.3.0 fails with "unknown version". The
+            # other targets stay on 7.3.0 until they are verified on 7.4.0.
+            cmake_js_version: "7.4.0"
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     env:
       ELECTRON_RUNTIME_VERSION: ${{ vars.REALTIMEX_ELECTRON_RUNTIME_VERSION || '41.0.3' }}
       ADDON_DIR: whisper-src/realtimex/electron-addon
+      # Minimum macOS of the mac assets. Pinned so the build host's macOS does
+      # not decide it (a newer self-hosted runner would otherwise raise it).
+      MACOS_MINIMUM_VERSION: "15.0"
     steps:
       - name: Checkout upstream whisper.cpp source
         uses: actions/checkout@v4
@@ -210,11 +223,14 @@ jobs:
       - name: Install addon build dependencies
         working-directory: ${{ env.ADDON_DIR }}
         run: |
-          npm install --no-save cmake-js@7.3.0 node-addon-api electron@${{ env.ELECTRON_RUNTIME_VERSION }}
+          npm install --no-save cmake-js@${{ matrix.cmake_js_version || '7.3.0' }} node-addon-api electron@${{ env.ELECTRON_RUNTIME_VERSION }}
 
       - name: Build whisper_addon.node
         if: runner.os != 'Windows'
         working-directory: ${{ env.ADDON_DIR }}
+        env:
+          # CMake and clang read this on macOS only.
+          MACOSX_DEPLOYMENT_TARGET: ${{ env.MACOS_MINIMUM_VERSION }}
         run: |
           set -euo pipefail
           npx cmake-js rebuild \
@@ -223,6 +239,15 @@ jobs:
             --runtime-version="${ELECTRON_RUNTIME_VERSION}" \
             --CD=GGML_VULKAN=ON
           test -f build/Release/whisper_addon.node
+
+      - name: Verify macOS minimum version
+        if: runner.os == 'macOS'
+        working-directory: ${{ env.ADDON_DIR }}
+        run: |
+          set -euo pipefail
+          minos="$(otool -l build/Release/whisper_addon.node | awk '$1 == "cmd" { build = ($2 == "LC_BUILD_VERSION") } build && $1 == "minos" { print $2; exit }')"
+          echo "whisper_addon.node minos=${minos} (expected ${MACOS_MINIMUM_VERSION})"
+          test "${minos}" = "${MACOS_MINIMUM_VERSION}"
 
       - name: Build whisper_addon.node
         if: runner.os == 'Windows'
