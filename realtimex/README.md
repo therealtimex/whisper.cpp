@@ -136,6 +136,30 @@ Mini setup (once, as rtxqa): the GitHub runner is unpacked in
 `~/actions-runner` (actions/runner 2.338.2, `osx-arm64`, sha256 checked). It is
 not configured as a service and holds no registration.
 
+### Verify a published release: `realtimex-verify-release.yml`
+
+Runs the app's whole native-STT sequence against a published release on all
+six platforms, with the app's Electron (default 44.10.2) as Node:
+
+```bash
+gh workflow run realtimex-verify-release.yml --repo therealtimex/whisper.cpp \
+  -f release_tag=realtimex-v1.9.5
+```
+
+Per platform it downloads that zip and checks its sha256 against the manifest,
+then `scripts/runtime_probe.cjs` does what `native.cjs` does: load, backend
+devices, initialize, transcribe upstream's `samples/jfk.wav` (one-off and
+session), dispose, and exit naturally. The model is the app's preferred
+`ggml-base-q5_1.bin` with its Silero VAD model, both pinned by sha256.
+`scripts/check_runtime_probe.py` passes a platform only with the jfk
+transcript on both paths and exit code 0 (a `#3238`-style abort at exit is
+134). The summary has one row per platform; probe output is kept 30 days.
+
+mac-x64 runs on CPU (`GGML_METAL_DEVICES=0`), as the app runs Intel Macs:
+Metal there returns empty text (realtimex-ai-app#2566). The probe also runs
+locally: `ELECTRON_RUN_AS_NODE=1 <electron> realtimex/scripts/runtime_probe.cjs
+<addon> <model> <wav>`, after `scripts/prepare_runtime_probe.py`.
+
 ### Watch upstream: `realtimex-watch-upstream.yml` and the iMac heartbeat
 
 `scripts/watch_upstream.py` compares the latest upstream release with
@@ -185,6 +209,9 @@ GH_TOKEN="$(gh auth token)" python3 realtimex/scripts/watch_upstream.py --force-
 | `scripts/validate_addon.py` | Gate a zip (layout, metadata, CPU, macOS floor, weak Napi exports) |
 | `scripts/smoke_load_addon.py` | Load the zipped addon and list its exports |
 | `scripts/build_manifest.py` | Write `whisper-addon-manifest.json`; require all platforms |
+| `scripts/prepare_runtime_probe.py` | Fetch a release's zip (sha256-checked), the app's models and jfk.wav |
+| `scripts/runtime_probe.cjs` | Run the app's native-STT sequence against an addon (Electron as Node) |
+| `scripts/check_runtime_probe.py` | Pass/fail a probe run: every step, both transcripts, exit 0 |
 | `scripts/book_runner.py` | Book a single-use runner for a queued fallback job (`--mint`, `--cleanup`) |
 | `self-hosted/start-jit-runner.sh` | On the mini: run one single-use runner under QA-LOCK |
 | `../.github/actions/whisper-addon` | The build, gate and upload steps every build job runs |

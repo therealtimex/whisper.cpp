@@ -1,0 +1,222 @@
+# Verify a published realtimex-* release the way the app runs it.
+#
+# On each of the six platforms: download that platform's zip, check its sha256
+# against the release manifest, then run realtimex/scripts/runtime_probe.cjs
+# under Electron as Node (ELECTRON_RUN_AS_NODE=1, the app's Electron version):
+# load, backend devices, initialize, transcribe upstream's samples/jfk.wav
+# (one-off and session paths), dispose, and exit naturally. The app's model
+# (ggml-base-q5_1) and VAD model are used, pinned by sha256.
+# check_runtime_probe.py passes a platform only with the expected transcript
+# on both paths and exit code 0 (realtimex-ai-app#3238 exited 134).
+#
+# mac-x64 runs on CPU (GGML_METAL_DEVICES=0), as the app runs Intel Macs:
+# Metal there returns empty text (realtimex-ai-app#2566).
+name: RealTimeX Verify Whisper Release
+run-name: Verify ${{ inputs.release_tag }} (Electron ${{ inputs.electron_runtime }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Published release to verify, e.g. realtimex-v1.9.5"
+        required: true
+        type: string
+      electron_runtime:
+        description: "Electron the app runs (realtimex-ai-app frontend/package.json)"
+        required: false
+        default: "44.10.2"
+        type: string
+      addon_electron_version:
+        description: "Require the release to be built for these Electron headers: the app pin's addonElectronVersion (empty: no check)"
+        required: false
+        default: ""
+        type: string
+      mac_arm64_runner:
+        description: "runs-on label for mac-arm64 (empty: REALTIMEX_MAC_ARM64_RUNNER, else macos-15)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  verify:
+    name: Verify ${{ matrix.asset_os }}-${{ matrix.asset_arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset_os: mac
+            asset_arch: x64
+            runner: macos-15-intel
+            gpu_env: GGML_METAL_DEVICES=0
+          - asset_os: mac
+            asset_arch: arm64
+            runner: ${{ inputs.mac_arm64_runner || vars.REALTIMEX_MAC_ARM64_RUNNER || 'macos-15' }}
+          - asset_os: linux
+            asset_arch: x64
+            runner: ubuntu-22.04
+          - asset_os: linux
+            asset_arch: arm64
+            runner: ubuntu-24.04-arm
+          - asset_os: win
+            asset_arch: x64
+            runner: windows-2022
+            python: python
+          - asset_os: win
+            asset_arch: arm64
+            runner: windows-11-arm
+            python: python
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      PY: ${{ matrix.python || 'python3' }}
+      GPU_ENV: ${{ matrix.gpu_env || '' }}
+    steps:
+      - name: Checkout release scripts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            realtimex
+          sparse-checkout-cone-mode: true
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.16.0"
+
+      - name: Cache models
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: models-cache
+          key: whisper-models-base-q5_1-422f1ae4-silero-2aa269b7
+
+      - name: Download the release asset and inputs
+        id: prepare
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          ADDON_ELECTRON_VERSION: ${{ inputs.addon_electron_version }}
+        run: |
+          set -euo pipefail
+          "${PY}" realtimex/scripts/prepare_runtime_probe.py \
+            --addon-electron-version "${ADDON_ELECTRON_VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --tag "${RELEASE_TAG}" \
+            --platform "${{ matrix.asset_os }}" \
+            --arch "${{ matrix.asset_arch }}" \
+            --out-dir verify \
+            --cache-dir models-cache \
+            --github-output
+
+      - name: Install Electron libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -uo pipefail
+          sudo apt-get update -qq
+          # Electron is one dynamically linked binary even as Node; Ubuntu 24.04
+          # renamed several of these with a t64 suffix.
+          for p in libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libgtk-3-0 \
+                   libgbm1 libasound2 libxss1 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 \
+                   libxfixes3 libpango-1.0-0 libcairo2 libexpat1 libdbus-1-3 libglib2.0-0; do
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "$p" >/dev/null 2>&1 \
+              || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "${p}t64" >/dev/null 2>&1 \
+              || echo "not installed: $p"
+          done
+
+      - name: Install Electron ${{ inputs.electron_runtime }}
+        id: electron
+        shell: bash
+        env:
+          ELECTRON_RUNTIME: ${{ inputs.electron_runtime }}
+        run: |
+          set -euo pipefail
+          mkdir -p electron-runtime
+          cd electron-runtime
+          npm install --no-save --no-audit --no-fund "electron@${ELECTRON_RUNTIME}" >/dev/null
+          electron="$(node -p "require('electron')")"
+          if command -v cygpath >/dev/null 2>&1; then
+            electron="$(cygpath -u "$electron")"
+          fi
+          if [ "${RUNNER_OS}" = "Linux" ] && ldd "$electron" | grep -q "not found"; then
+            echo "::error::Electron is missing shared libraries:"
+            ldd "$electron" | grep "not found"
+            exit 1
+          fi
+          echo "Electron: $(ELECTRON_RUN_AS_NODE=1 "$electron" -p 'process.versions.electron') at $electron"
+          echo "path=$electron" >> "$GITHUB_OUTPUT"
+
+      - name: Run the runtime probe
+        shell: bash
+        env:
+          ELECTRON_BIN: ${{ steps.electron.outputs.path }}
+          ADDON: ${{ steps.prepare.outputs.addon }}
+          MODEL: ${{ steps.prepare.outputs.model }}
+          WAV: ${{ steps.prepare.outputs.wav }}
+        run: |
+          set -uo pipefail
+          # shellcheck disable=SC2086 # GPU_ENV is empty or one NAME=value word
+          env ${GPU_ENV} ELECTRON_RUN_AS_NODE=1 "${ELECTRON_BIN}" realtimex/scripts/runtime_probe.cjs \
+            "${ADDON}" "${MODEL}" "${WAV}" > verify/probe.jsonl 2> verify/probe.err
+          rc=$?
+          "${PY}" realtimex/scripts/check_runtime_probe.py --log verify/probe.jsonl --exit-code "$rc" --json > verify/verdict.json
+          ok=$?
+          "${PY}" realtimex/scripts/check_runtime_probe.py --log verify/probe.jsonl --exit-code "$rc" | tee -a "$GITHUB_STEP_SUMMARY" || true
+          if [ "$ok" -ne 0 ]; then
+            echo "--- probe output"; cat verify/probe.jsonl
+            echo "--- probe stderr"; tail -n 40 verify/probe.err
+          fi
+          exit "$ok"
+
+      - name: Upload probe output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runtime-probe-${{ matrix.asset_os }}-${{ matrix.asset_arch }}
+          path: |
+            verify/probe.jsonl
+            verify/probe.err
+            verify/verdict.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  summary:
+    name: Summary
+    needs: verify
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download probe outputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: probes
+          pattern: runtime-probe-*
+      - name: Write the summary table
+        shell: python
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          import json, os, pathlib
+          rows = []
+          # Every platform gets a row, also one whose job failed before the probe.
+          for platform in ("mac-x64", "mac-arm64", "linux-x64", "linux-arm64", "win-x64", "win-arm64"):
+              v = pathlib.Path("probes") / f"runtime-probe-{platform}" / "verdict.json"
+              if not v.exists():
+                  rows.append(f"| {platform} | FAIL: no verdict (the job failed before the probe ran) | | | |")
+                  continue
+              r = json.loads(v.read_text())
+              text = (r.get("texts") or {}).get("transcribed-session") or (r.get("texts") or {}).get("transcribed-legacy") or ""
+              rows.append("| {} | {} | {} | {} | {} |".format(
+                  platform, "PASS" if r["passed"] else "FAIL: " + "; ".join(r["problems"])[:120],
+                  ", ".join(r.get("devices") or []), r.get("exitCode"), text[:70]))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write(f"## Runtime probe: {os.environ['RELEASE_TAG']}\n\n")
+              fh.write("| platform | result | devices | exit | transcript |\n|---|---|---|---|---|\n")
+              fh.write("\n".join(rows) + "\n")
