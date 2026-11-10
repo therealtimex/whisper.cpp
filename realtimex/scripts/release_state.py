@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Report the state of a packaging release (absent, draft, complete, ...).
 
-With --require-complete it exits 1 unless the release is published and has
-every asset of the matrix plus the manifest.
+With --require-complete it exits 1 unless the release is published, has
+every asset of the matrix plus the manifest, its manifest reports no problem,
+and it was built for this Electron runtime (and --upstream-sha, if given).
 
 With --require-assemblable it exits 1 unless the release is absent or a draft:
 published `realtimex-*` releases are immutable, because the app pins them by

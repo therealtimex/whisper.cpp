@@ -53,7 +53,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: realtimex-whisper-addon-${{ inputs.release_tag || inputs.upstream_ref || 'latest-upstream' }}
+  # Keyed by the release tag, defaulted like resolve-upstream does, so runs
+  # for the same tag queue behind each other whether or not it was given.
+  group: realtimex-whisper-addon-${{ inputs.release_tag || (inputs.upstream_ref && format('realtimex-{0}', inputs.upstream_ref)) || 'latest-upstream' }}
   cancel-in-progress: false
 
 env:
@@ -342,6 +344,20 @@ jobs:
             --upstream-sha "${UPSTREAM_SHA}" \
             --require-assemblable)"
           state="$(jq -r '.state' <<< "$state_json")"
+
+          # GitHub ignores --target once the tag exists: a leftover tag would
+          # publish this release at an older packaging commit.
+          ref_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" 2>/dev/null || true)"
+          if [ -n "$ref_json" ] && [ "$(jq -r '.object.sha // empty' <<< "$ref_json")" != "" ]; then
+            tag_sha="$(jq -r '.object.sha' <<< "$ref_json")"
+            if [ "$(jq -r '.object.type' <<< "$ref_json")" = "tag" ]; then
+              tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq '.object.sha')"
+            fi
+            if [ "$tag_sha" != "${GITHUB_SHA}" ]; then
+              echo "::error::Tag ${RELEASE_TAG} already exists at ${tag_sha}, not this build's commit ${GITHUB_SHA}; use a new release_tag"
+              exit 1
+            fi
+          fi
 
           title="RealTimeX Whisper Addon ${RELEASE_TAG}"
           notes="$(mktemp)"

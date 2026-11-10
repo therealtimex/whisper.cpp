@@ -21,8 +21,10 @@ The harness lives in `electron-addon/`; the release scripts in `scripts/`.
 - **Published releases are immutable.** The app pins a release by tag alone,
   so changing its assets changes what every build ships. A rebuilt addon (new
   harness, new flags, new Electron runtime) gets a new tag such as
-  `realtimex-b4938-rtx2`. The release workflow refuses a tag that is already
-  published, before building and again before publishing.
+  `realtimex-b4938-rtx2`. A publish run refuses a tag that is already
+  published, before building and again before publishing (dry runs may build
+  any tag; they publish nothing). It also refuses a leftover git tag that
+  points at another commit.
 - **Assembled as a draft, published complete.** Assets go to a draft release;
   the manifest is uploaded last; the release is published only when all six
   zips and the manifest are there. A failed run leaves at most a draft, which
@@ -89,22 +91,26 @@ the fallback (it can't be shortened per job).
      stale single-use registrations, and mints a single-use (JIT) runner
      configuration that only carries the fallback label;
    - the heartbeat sends `self-hosted/start-jit-runner.sh` with that
-     configuration over SSH to `rtxqa@` the mini (`macmini-qa`), a non-admin
-     account that can't change the Homebrew tools the GitLab release builds use;
-   - the script refuses while `~rtxqa/QA-LOCK` is held, writes QA-LOCK for the
-     build, runs the runner from `~rtxqa/actions-runner` at lower CPU priority,
-     stops it if no job arrives within 20 minutes (75 minutes overall), and
-     releases only its own lock. The runner takes one job and unregisters.
+     configuration over SSH to the mini's `rtxqa` account (SSH alias
+     `macmini-qa`), a non-admin account that can't change the Homebrew tools
+     the GitLab release builds use;
+   - the script refuses while `~rtxqa/QA-LOCK` is held (it reclaims only a
+     lock its own supervisor left behind when that supervisor is gone), its
+     supervisor takes QA-LOCK atomically with its PID for the build, runs the
+     runner from `~rtxqa/actions-runner` at lower CPU priority, stops it if no
+     job arrives within 20 minutes (75 minutes overall), and releases only its
+     own lock. The runner takes one job and unregisters.
 4. Publish takes mac-arm64 from whichever job succeeded.
 
 The heartbeat ticks every 15 minutes, so the fallback build starts up to about
 15 minutes after GitHub's cancellation. If the mini stays busy (QA-LOCK) the job
 waits; a queued self-hosted job is cancelled by GitHub after 24 hours.
 
-Token: the heartbeat uses `~/.config/rtx-whisper-runner/token` on the iMac
-(a fine-grained token for this repository only: Administration read/write,
-Actions read), else the `gh` login's token. Only the single-use runner
-configuration reaches the mini.
+Token: booking needs `~/.config/rtx-whisper-runner/token` (or
+`.../token/token`) on the iMac: a fine-grained token for this repository only,
+with Administration read/write and Actions read. Without it the heartbeat does
+not book the mini (it never falls back to a broader token for this). Only the
+single-use runner configuration reaches the mini.
 
 Mini setup (once, as rtxqa): the GitHub runner is unpacked in
 `~/actions-runner` (actions/runner 2.338.2, `osx-arm64`, sha256 checked). It is
@@ -129,8 +135,10 @@ The watcher:
 - stops after `--max-attempts` (4) failed attempts on the current packaging
   commit and reports `attempts-exhausted`. A new commit on `master` (for
   example a harness fix) starts a fresh count;
-- never touches a published release; a published but incomplete or mismatched
-  one is reported as `needs-human:<state>`;
+- never touches a published release. A published release built for another
+  Electron runtime is left as is, and the new runtime gets its own tag (next
+  bullet); any other published but incomplete, invalid or mismatched release
+  is reported as `needs-human:<state>`;
 - builds a new Electron runtime (`REALTIMEX_ELECTRON_RUNTIME_VERSION`) under
   `realtimex-<ref>-electron-<version>`, since `realtimex-<ref>` is immutable.
 

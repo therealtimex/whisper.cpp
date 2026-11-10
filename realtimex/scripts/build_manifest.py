@@ -4,7 +4,8 @@
 The manifest lists every asset with its size, sha256 and packaging metadata,
 plus `expectedAssetNames` and `complete`, so the watcher can tell a finished
 release from a partial one. With --require-complete it exits 1 unless every
-platform in the release matrix is present.
+platform in the release matrix is present and no asset has a problem (built
+from another upstream SHA or Electron runtime, or not in the matrix).
 """
 
 from __future__ import annotations

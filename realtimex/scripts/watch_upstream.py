@@ -41,6 +41,7 @@ from addon_release import (  # noqa: E402
     DEFAULT_ELECTRON_VERSION,
     ELECTRON_VARIABLE,
     PACKAGING_REPO,
+    RUN_TITLE_PREFIX,
     STATE_COMPLETE,
     STATE_ELECTRON_MISMATCH,
     UPSTREAM_REPO,
@@ -111,7 +112,12 @@ def decide(
             out["reason"] = f"paused:{name}={workflow_states.get(name) or 'missing'}"
             return out
 
-    matching = [r for r in runs if r.get("display_title") == title]
+    # A publish run dispatched with an empty release_tag is titled without the
+    # tag; it targets the default tag, so it counts for that target too.
+    titles = {title}
+    if release_tag == default_release_tag(upstream_ref):
+        titles.add(f"{RUN_TITLE_PREFIX} {upstream_ref}")
+    matching = [r for r in runs if r.get("display_title") in titles]
     matching.sort(key=lambda r: r.get("created_at") or "", reverse=True)
     active = next((r for r in matching if r.get("status") != "completed"), None)
     if active is not None:

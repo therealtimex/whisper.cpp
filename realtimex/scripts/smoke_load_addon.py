@@ -26,7 +26,8 @@ from addon_release import ADDON_NAME  # noqa: E402
 LOADER = (
     "const m = require(require('path').resolve(process.argv[1]));"
     "const keys = Object.keys(m).sort();"
-    "if (!keys.length) { console.error('addon exports nothing'); process.exit(2); }"
+    "if (!keys.some((k) => typeof m[k] === 'function')) {"
+    " console.error('addon exports no function: ' + keys.join(', ')); process.exit(2); }"
     "console.log('exports: ' + keys.join(', '));"
 )
 
