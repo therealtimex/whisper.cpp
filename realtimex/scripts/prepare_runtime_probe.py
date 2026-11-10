@@ -90,7 +90,12 @@ def manifest_asset(manifest: Dict, name: str) -> Dict:
     raise SystemExit(f"{name} is not listed in {MANIFEST_NAME}")
 
 
-def prepare(gh: GitHub, repo: str, tag: str, platform: str, arch: str, out_dir: str, cache_dir: str) -> Dict[str, str]:
+def prepare(gh: GitHub, repo: str, tag: str, platform: str, arch: str, out_dir: str, cache_dir: str,
+            addon_electron_version: str = "") -> Dict[str, str]:
+    """`addon_electron_version` is the Electron *headers* version the app's pin
+    names (addonElectronVersion), not the runtime the probe runs under: an
+    N-API addon built against 41.0.3 headers runs on Electron 44. When given, the
+    release must have been built for it."""
     os.makedirs(out_dir, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
     release = gh.find_release(repo, tag)
@@ -100,7 +105,10 @@ def prepare(gh: GitHub, repo: str, tag: str, platform: str, arch: str, out_dir: 
     if not isinstance(manifest, dict):
         raise SystemExit(f"{tag}: {MANIFEST_NAME} is missing or unreadable")
 
-    name = asset_name(platform, arch, str(manifest.get("electronRuntimeVersion")))
+    built_for = str(manifest.get("electronRuntimeVersion"))
+    if addon_electron_version and built_for != addon_electron_version:
+        raise SystemExit(f"{tag} was built for Electron {built_for} headers, not {addon_electron_version}")
+    name = asset_name(platform, arch, built_for)
     entry = manifest_asset(manifest, name)
     url = next((a["browser_download_url"] for a in release.get("assets") or [] if a.get("name") == name), None)
     if not url:
@@ -140,10 +148,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--arch", required=True, choices=["x64", "arm64"])
     p.add_argument("--out-dir", required=True)
     p.add_argument("--cache-dir", required=True)
+    p.add_argument("--addon-electron-version", default="",
+                   help="Require the release to be built for these Electron headers (the pin's addonElectronVersion)")
     p.add_argument("--github-output", action="store_true")
     args = p.parse_args(argv)
 
-    paths = prepare(GitHub(), args.repo, args.tag, args.platform, args.arch, args.out_dir, args.cache_dir)
+    paths = prepare(GitHub(), args.repo, args.tag, args.platform, args.arch, args.out_dir, args.cache_dir,
+                    args.addon_electron_version)
     print(json.dumps(paths, indent=2))
     if args.github_output:
         write_github_output(paths)

@@ -26,6 +26,11 @@ on:
         required: false
         default: "44.10.2"
         type: string
+      addon_electron_version:
+        description: "Require the release to be built for these Electron headers: the app pin's addonElectronVersion (empty: no check)"
+        required: false
+        default: ""
+        type: string
       mac_arm64_runner:
         description: "runs-on label for mac-arm64 (empty: REALTIMEX_MAC_ARM64_RUNNER, else macos-15)"
         required: false
@@ -98,9 +103,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
+          ADDON_ELECTRON_VERSION: ${{ inputs.addon_electron_version }}
         run: |
           set -euo pipefail
           "${PY}" realtimex/scripts/prepare_runtime_probe.py \
+            --addon-electron-version "${ADDON_ELECTRON_VERSION}" \
             --repo "${GITHUB_REPOSITORY}" \
             --tag "${RELEASE_TAG}" \
             --platform "${{ matrix.asset_os }}" \
@@ -198,15 +205,16 @@ jobs:
         run: |
           import json, os, pathlib
           rows = []
-          for d in sorted(pathlib.Path("probes").glob("runtime-probe-*")):
-              v = d / "verdict.json"
+          # Every platform gets a row, also one whose job failed before the probe.
+          for platform in ("mac-x64", "mac-arm64", "linux-x64", "linux-arm64", "win-x64", "win-arm64"):
+              v = pathlib.Path("probes") / f"runtime-probe-{platform}" / "verdict.json"
               if not v.exists():
-                  rows.append(f"| {d.name[14:]} | no verdict | | | |")
+                  rows.append(f"| {platform} | FAIL: no verdict (the job failed before the probe ran) | | | |")
                   continue
               r = json.loads(v.read_text())
               text = (r.get("texts") or {}).get("transcribed-session") or (r.get("texts") or {}).get("transcribed-legacy") or ""
               rows.append("| {} | {} | {} | {} | {} |".format(
-                  d.name[14:], "PASS" if r["passed"] else "FAIL: " + "; ".join(r["problems"])[:120],
+                  platform, "PASS" if r["passed"] else "FAIL: " + "; ".join(r["problems"])[:120],
                   ", ".join(r.get("devices") or []), r.get("exitCode"), text[:70]))
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
               fh.write(f"## Runtime probe: {os.environ['RELEASE_TAG']}\n\n")

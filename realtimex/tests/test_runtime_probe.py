@@ -77,6 +77,19 @@ class CheckRuntimeProbeTests(unittest.TestCase):
         steps.insert(3, {"step": "devices-error", "message": "boom"})
         self.assertFalse(crp.judge(lines(*steps), 0)["passed"])
 
+    def test_skipped_session_path_fails(self):
+        v = crp.judge(lines(*good_run(drop=["session-initialized", "transcribed-session", "session-destroyed"])), 0)
+        self.assertFalse(v["passed"])
+        self.assertTrue(any("session-initialized" in p for p in v["problems"]))
+
+    def test_skipped_dispose_fails(self):
+        v = crp.judge(lines(*good_run(drop=["disposed"])), 0)
+        self.assertFalse(v["passed"])
+
+    def test_empty_expected_phrase_is_refused(self):
+        with self.assertRaises(ValueError):
+            crp.judge(lines(*good_run()), 0, expect=" ,. ")
+
     def test_non_json_noise_is_ignored(self):
         noise = ["whisper_init_from_file_with_params: loading model\n"]
         self.assertTrue(crp.judge(noise + lines(*good_run()), 0)["passed"])
@@ -136,6 +149,16 @@ class PrepareRuntimeProbeTests(unittest.TestCase):
         self.manifest["assets"][0]["sha256"] = "0" * 64
         with self.assertRaises(SystemExit):
             self.run_prepare(self.gh())
+
+    def test_release_built_for_other_electron_headers_is_refused(self):
+        pinned = {n: (u, hashlib.sha256(self.models[n]).hexdigest()) for n, (u, _) in prp.MODELS.items()}
+        with mock.patch.object(prp, "fetch", self.fake_fetch), mock.patch.object(prp, "MODELS", pinned):
+            with self.assertRaises(SystemExit):
+                prp.prepare(self.gh(), "o/r", "realtimex-v1.9.5", "linux", "x64",
+                            os.path.join(self.dir, "out"), os.path.join(self.dir, "cache"), "44.10.2")
+            out = prp.prepare(self.gh(), "o/r", "realtimex-v1.9.5", "linux", "x64",
+                              os.path.join(self.dir, "out"), os.path.join(self.dir, "cache"), "41.0.3")
+        self.assertTrue(out["addon"].endswith(prp.ADDON_NAME))
 
     def test_draft_release_is_refused(self):
         with self.assertRaises(SystemExit):

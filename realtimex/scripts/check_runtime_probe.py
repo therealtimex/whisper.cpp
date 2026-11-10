@@ -18,8 +18,11 @@ from typing import Any, Dict, List, Optional
 # jfk.wav: "And so my fellow Americans, ask not what your country can do for you,
 # ask what you can do for your country."
 DEFAULT_EXPECT = "ask not what your country can do for you"
-REQUIRED_STEPS = ["env", "loaded", "devices", "wav", "initialized", "transcribed-legacy", "done"]
-SESSION_STEPS = ["session-initialized", "transcribed-session", "session-destroyed"]
+# Every step the app's native.cjs goes through, session path and dispose included.
+REQUIRED_STEPS = [
+    "env", "loaded", "devices", "wav", "initialized", "transcribed-legacy",
+    "session-initialized", "transcribed-session", "session-destroyed", "disposed", "done",
+]
 
 
 def normalize(text: str) -> str:
@@ -40,6 +43,9 @@ def parse(lines: List[str]) -> List[Dict[str, Any]]:
 
 
 def judge(lines: List[str], exit_code: int, expect: str = DEFAULT_EXPECT) -> Dict[str, Any]:
+    want = normalize(expect)
+    if not want:
+        raise ValueError("the expected phrase is empty; it would match any transcript")
     steps = parse(lines)
     by_step: Dict[str, Dict[str, Any]] = {}
     for s in steps:
@@ -52,12 +58,6 @@ def judge(lines: List[str], exit_code: int, expect: str = DEFAULT_EXPECT) -> Dic
         problems.append(f"getBackendDevices failed: {by_step['devices-error'].get('message')}")
     if "error" in by_step:
         problems.append(f"error: {str(by_step['error'].get('message'))[:200]}")
-    has_session = "session-initialized" in by_step
-    if has_session:
-        for name in SESSION_STEPS:
-            if name not in by_step:
-                problems.append(f"missing step '{name}'")
-    want = normalize(expect)
     texts: Dict[str, Optional[str]] = {}
     for name in ("transcribed-legacy", "transcribed-session"):
         if name in by_step:
@@ -77,7 +77,6 @@ def judge(lines: List[str], exit_code: int, expect: str = DEFAULT_EXPECT) -> Dic
         "electron": env.get("electron"),
         "napi": env.get("napi"),
         "devices": [d.get("name") for d in devices] if isinstance(devices, list) else devices,
-        "sessionPath": has_session,
         "texts": texts,
         "ms": by_step.get("done", {}).get("ms"),
     }
@@ -91,7 +90,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
     with open(args.log, encoding="utf-8", errors="replace") as fh:
-        verdict = judge(fh.readlines(), args.exit_code, args.expect)
+        try:
+            verdict = judge(fh.readlines(), args.exit_code, args.expect)
+        except ValueError as err:
+            print(f"error: {err}", file=sys.stderr)
+            return 2
     if args.json:
         print(json.dumps(verdict, indent=2))
     else:

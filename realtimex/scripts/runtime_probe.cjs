@@ -70,8 +70,10 @@ const pipeline = (extra) => ({
   });
   const addon = require(path.resolve(addonPath));
   log("loaded", { exports: Object.keys(addon).sort() });
+  // Every API the app uses is called unconditionally: a missing export throws
+  // and the run fails instead of skipping that path.
   try {
-    log("devices", { devices: addon.getBackendDevices?.() ?? null });
+    log("devices", { devices: addon.getBackendDevices() });
   } catch (e) {
     log("devices-error", { message: String(e && e.message) });
   }
@@ -83,18 +85,14 @@ const pipeline = (extra) => ({
   const r1 = await transcribe(addon, samples, {});
   log("transcribed-legacy", { text: textOf(r1).trim() });
 
-  if (typeof addon.initializeSession === "function") {
-    const s = await addon.initializeSession(pipeline({ sessionId: "runtime-probe" }));
-    log("session-initialized", { result: s ?? null });
-    const r2 = await transcribe(addon, samples, { sessionId: "runtime-probe" });
-    log("transcribed-session", { text: textOf(r2).trim() });
-    const d = await addon.destroySession("runtime-probe");
-    log("session-destroyed", { result: d ?? null });
-  }
-  if (typeof addon.dispose === "function") {
-    addon.dispose();
-    log("disposed", {});
-  }
+  const s = await addon.initializeSession(pipeline({ sessionId: "runtime-probe" }));
+  log("session-initialized", { result: s ?? null });
+  const r2 = await transcribe(addon, samples, { sessionId: "runtime-probe" });
+  log("transcribed-session", { text: textOf(r2).trim() });
+  const d = await addon.destroySession("runtime-probe");
+  log("session-destroyed", { result: d ?? null });
+  addon.dispose();
+  log("disposed", {});
   process.on("exit", (code) => log("exit", { code }));
   log("done", {});
 })().catch((e) => {
