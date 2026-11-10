@@ -1,6 +1,6 @@
 # Watch ggml-org/whisper.cpp and start the RealTimeX whisper addon release.
 #
-# Hourly checks run outside GitHub, from the RealTimeX heartbeat on the iMac
+# Frequent checks run outside GitHub, from the RealTimeX heartbeat on the iMac
 # (agent-heartbeat workspace, task whisper-cpp-release-watch): GitHub throttles
 # scheduled workflows on forks, and this one once went a month without a
 # scheduled run. This cron is a daily backstop.

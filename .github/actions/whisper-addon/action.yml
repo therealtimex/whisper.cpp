@@ -1,0 +1,310 @@
+# Build, gate and upload one whisper_addon.node platform. Every build job in
+# realtimex-whisper-addon.yml uses it (hosted matrix, hosted mac-arm64 and the
+# self-hosted mac-arm64 fallback), so they all run the same steps.
+#
+# The calling job checks this repository out to `packaging` (sparse: realtimex
+# and .github/actions), then runs `uses: ./packaging/.github/actions/whisper-addon`.
+name: Build whisper addon
+description: Build whisper_addon.node for one platform, gate it and upload the zip
+inputs:
+  asset_os:
+    description: mac, linux or win
+    required: true
+  asset_arch:
+    description: x64 or arm64
+    required: true
+  node_arch:
+    description: cmake-js --arch
+    required: true
+  msvc_arch:
+    description: MSVC developer prompt architecture (Windows only)
+    required: false
+    default: ""
+  python:
+    description: Python command on this runner
+    required: false
+    default: python3
+  cmake_js_version:
+    description: cmake-js version
+    required: false
+    default: "7.3.0"
+  upstream_ref:
+    description: ggml-org/whisper.cpp ref
+    required: true
+  upstream_sha:
+    description: ggml-org/whisper.cpp commit
+    required: true
+  electron_version:
+    description: Electron runtime headers to build against
+    required: true
+  macos_deployment_target:
+    description: Minimum macOS for the mac builds (the app's floor)
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Prepare build environment
+      shell: bash
+      env:
+        IN_PY: ${{ inputs.python }}
+        IN_UPSTREAM_REF: ${{ inputs.upstream_ref }}
+        IN_UPSTREAM_SHA: ${{ inputs.upstream_sha }}
+        IN_ELECTRON: ${{ inputs.electron_version }}
+        IN_MACOS: ${{ inputs.macos_deployment_target }}
+      run: |
+        set -euo pipefail
+        # Self-hosted runners keep their workspace between jobs: never upload
+        # a zip left over from an earlier run.
+        rm -rf realtimex-dist
+        {
+          echo "ADDON_DIR=whisper-src/realtimex/electron-addon"
+          echo "PY=${IN_PY}"
+          echo "UPSTREAM_REF=${IN_UPSTREAM_REF}"
+          echo "UPSTREAM_SHA=${IN_UPSTREAM_SHA}"
+          echo "ELECTRON_RUNTIME_VERSION=${IN_ELECTRON}"
+          echo "MACOS_DEPLOYMENT_TARGET=${IN_MACOS}"
+        } >> "$GITHUB_ENV"
+
+    - name: Checkout upstream whisper.cpp source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      with:
+        repository: ggml-org/whisper.cpp
+        ref: ${{ inputs.upstream_sha }}
+        path: whisper-src
+        fetch-depth: 1
+        persist-credentials: false
+
+    - name: Setup Node
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      with:
+        node-version: "22.16.0"
+
+    - name: Install Linux build dependencies
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build
+
+    - name: Verify macOS build tools
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        set -euo pipefail
+        cmake --version
+        xcodebuild -version
+
+    - name: Setup MSVC command prompt
+      if: runner.os == 'Windows'
+      uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      with:
+        arch: ${{ inputs.msvc_arch }}
+
+    - name: Verify Windows build tools
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        cmake --version
+        ninja --version
+        cl
+
+    - name: Verify Windows runner architecture
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $actualArch = switch ($env:PROCESSOR_ARCHITECTURE) {
+          "AMD64" { "x64" }
+          "ARM64" { "arm64" }
+          default { $env:PROCESSOR_ARCHITECTURE }
+        }
+        if ($actualArch -ne "${{ inputs.asset_arch }}") {
+          throw "Runner architecture mismatch: expected ${{ inputs.asset_arch }}, got $actualArch ($env:PROCESSOR_ARCHITECTURE)"
+        }
+
+    - name: Verify runner architecture
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        machine="$(uname -m)"
+        case "$machine" in
+          x86_64|amd64) actual_arch="x64" ;;
+          arm64|aarch64) actual_arch="arm64" ;;
+          *) actual_arch="$machine" ;;
+        esac
+        if [ "$actual_arch" != "${{ inputs.asset_arch }}" ]; then
+          echo "Runner architecture mismatch: expected ${{ inputs.asset_arch }}, got $actual_arch ($machine)"
+          exit 1
+        fi
+
+    - name: Install addon harness
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        rm -rf whisper-src/realtimex
+        mkdir -p whisper-src/realtimex
+        cp -R packaging/realtimex/electron-addon whisper-src/realtimex/electron-addon
+
+    - name: Install addon harness
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        if (Test-Path "whisper-src\realtimex") {
+          Remove-Item -Path "whisper-src\realtimex" -Recurse -Force
+        }
+        New-Item -Path "whisper-src\realtimex" -ItemType Directory -Force | Out-Null
+        Copy-Item -Path "packaging\realtimex\electron-addon" -Destination "whisper-src\realtimex\electron-addon" -Recurse -Force
+
+    - name: Install addon build dependencies
+      working-directory: whisper-src/realtimex/electron-addon
+      shell: bash
+      run: |
+        npm install --no-save cmake-js@${{ inputs.cmake_js_version }} node-addon-api electron@${{ inputs.electron_version }}
+
+    - name: Build whisper_addon.node
+      if: runner.os != 'Windows'
+      working-directory: whisper-src/realtimex/electron-addon
+      env:
+        # CMake and clang read this on macOS only.
+        MACOSX_DEPLOYMENT_TARGET: ${{ inputs.macos_deployment_target }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        extra=()
+        if [ "${RUNNER_OS}" = "macOS" ]; then
+          # Explicit floor: without it the addon inherits the runner's macOS
+          # version (realtimex-b4938 says minos 15.0; the app supports 13).
+          export MACOSX_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET}"
+          extra+=("--CD=CMAKE_OSX_DEPLOYMENT_TARGET=${MACOS_DEPLOYMENT_TARGET}")
+        fi
+        npx cmake-js rebuild \
+          --arch=${{ inputs.node_arch }} \
+          --runtime=electron \
+          --runtime-version="${ELECTRON_RUNTIME_VERSION}" \
+          --CD=GGML_VULKAN=ON \
+          ${extra[@]+"${extra[@]}"}
+        test -f build/Release/whisper_addon.node
+
+    - name: Verify macOS minimum version
+      if: runner.os == 'macOS'
+      working-directory: whisper-src/realtimex/electron-addon
+      shell: bash
+      run: |
+        set -euo pipefail
+        minos="$(otool -l build/Release/whisper_addon.node | awk '$1 == "cmd" { build = ($2 == "LC_BUILD_VERSION") } build && $1 == "minos" { print $2; exit }')"
+        echo "whisper_addon.node minos=${minos} (expected ${MACOS_DEPLOYMENT_TARGET})"
+        test "${minos}" = "${MACOS_DEPLOYMENT_TARGET}"
+
+    - name: Build whisper_addon.node
+      if: runner.os == 'Windows'
+      working-directory: whisper-src/realtimex/electron-addon
+      shell: pwsh
+      run: |
+        $windowsRc = Join-Path $env:UniversalCRTSdkDir "bin\$env:UCRTVersion\x64\rc.exe"
+        if (!(Test-Path $windowsRc)) {
+          throw "Missing Windows SDK resource compiler at $windowsRc"
+        }
+        $env:RC = $windowsRc
+
+        if ("${{ inputs.node_arch }}" -eq "arm64") {
+          npx cmake-js install `
+            --arch=arm64 `
+            --runtime=electron `
+            --runtime-version="$env:ELECTRON_RUNTIME_VERSION"
+          if ($LASTEXITCODE -ne 0) {
+            throw "cmake-js install failed with exit code $LASTEXITCODE"
+          }
+
+          $distDir = Join-Path $env:USERPROFILE ".cmake-js\electron-arm64\v$env:ELECTRON_RUNTIME_VERSION"
+          $nodeLib = Join-Path $distDir "node.lib"
+          $nodeLibUrl = "https://artifacts.electronjs.org/headers/dist/v$env:ELECTRON_RUNTIME_VERSION/arm64/node.lib"
+          Invoke-WebRequest -Uri $nodeLibUrl -OutFile $nodeLib
+          dumpbin /headers $nodeLib | Select-String -Pattern "machine"
+        }
+
+        $cmakeJsArgs = @(
+          "cmake-js",
+          "rebuild",
+          "--arch=${{ inputs.node_arch }}",
+          "--runtime=electron",
+          "--runtime-version=$env:ELECTRON_RUNTIME_VERSION",
+          "--generator=Ninja",
+          "--CD=CMAKE_RC_COMPILER=$windowsRc",
+          "--CD=GGML_VULKAN=ON"
+        )
+        npx @cmakeJsArgs
+        if ($LASTEXITCODE -ne 0) {
+          throw "cmake-js rebuild failed with exit code $LASTEXITCODE"
+        }
+
+        $addon = Get-ChildItem -Path "build" -Recurse -Filter "whisper_addon.node" | Select-Object -First 1
+        if (!$addon) {
+          throw "Missing whisper_addon.node under build"
+        }
+        Write-Host "Built $($addon.FullName)"
+
+    - name: Package addon
+      shell: bash
+      run: |
+        set -euo pipefail
+        "${PY}" packaging/realtimex/scripts/package_addon.py \
+          --build-dir "${ADDON_DIR}/build" \
+          --out-dir realtimex-dist \
+          --platform "${{ inputs.asset_os }}" \
+          --arch "${{ inputs.asset_arch }}" \
+          --node-arch "${{ inputs.node_arch }}" \
+          --electron-version "${ELECTRON_RUNTIME_VERSION}" \
+          --upstream-ref "${UPSTREAM_REF}" \
+          --upstream-sha "${UPSTREAM_SHA}" \
+          --packaging-repo "${GITHUB_REPOSITORY}" \
+          --packaging-sha "${GITHUB_SHA}" \
+          --macos-deployment-target "${MACOS_DEPLOYMENT_TARGET}"
+
+    - name: Gate packaged addon
+      shell: bash
+      run: |
+        set -euo pipefail
+        "${PY}" packaging/realtimex/scripts/validate_addon.py \
+          --zip "realtimex-dist/whisper-addon-${{ inputs.asset_os }}-${{ inputs.asset_arch }}-electron-${ELECTRON_RUNTIME_VERSION}.zip" \
+          --platform "${{ inputs.asset_os }}" \
+          --arch "${{ inputs.asset_arch }}" \
+          --electron-version "${ELECTRON_RUNTIME_VERSION}" \
+          --upstream-sha "${UPSTREAM_SHA}" \
+          --max-macos-deployment-target "${MACOS_DEPLOYMENT_TARGET}"
+
+    - name: Load packaged addon
+      shell: bash
+      run: |
+        set -euo pipefail
+        "${PY}" packaging/realtimex/scripts/smoke_load_addon.py \
+          --zip "realtimex-dist/whisper-addon-${{ inputs.asset_os }}-${{ inputs.asset_arch }}-electron-${ELECTRON_RUNTIME_VERSION}.zip" \
+          --runtime node
+
+    # Uploads from the self-hosted Mac have timed out (ETIMEDOUT on
+    # CreateArtifact); retry once, as the llama.cpp fork does for its DGX runner.
+    - name: Upload workflow artifact
+      id: upload
+      continue-on-error: true
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: whisper-addon-${{ inputs.asset_os }}-${{ inputs.asset_arch }}
+        path: realtimex-dist/*.zip
+        if-no-files-found: error
+        retention-days: 7
+
+    - name: Wait before retrying the upload
+      if: steps.upload.outcome == 'failure'
+      shell: bash
+      run: sleep 20
+
+    - name: Retry workflow artifact upload
+      if: steps.upload.outcome == 'failure'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: whisper-addon-${{ inputs.asset_os }}-${{ inputs.asset_arch }}
+        path: realtimex-dist/*.zip
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: true
