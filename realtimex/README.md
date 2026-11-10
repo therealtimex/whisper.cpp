@@ -16,6 +16,26 @@ release tag and Electron version).
 
 The harness lives in `electron-addon/`; the release scripts in `scripts/`.
 
+### Harness
+
+`electron-addon/CMakeLists.txt` builds whisper and ggml with upstream's own
+CMake (static, linked into the addon), so upstream can move or add sources
+without breaking the build. Its decisions:
+
+- hidden visibility for everything, so the addon exports only its N-API
+  entry points (realtimex-ai-app#3229);
+- `GGML_NATIVE=OFF`: portable binaries, not tuned to the build runner. x64
+  gets AVX, AVX2, F16C, FMA (and SSE4.2, BMI2) and needs a Haswell-or-newer
+  CPU, as before. Apple Silicon and Linux arm64 use the compiler's baseline;
+- `GGML_OPENMP=OFF`: ggml's own threads, no `libgomp.so.1` or
+  `vcomp140.dll` runtime dependency;
+- Windows arm64 with MSVC must use `GGML_NATIVE=ON`, which probes the
+  runner's CPU; the i8mm, SVE and SME probes are pinned off (the
+  windows-11-arm runners have them, Snapdragon laptops don't), dotprod and
+  FMA are probed;
+- Metal (embedded library) and Accelerate on macOS; Vulkan on Windows and
+  Linux only when the SDK and `glslc` are present, else CPU.
+
 ## Rules
 
 - **Published releases are immutable.** The app pins a release by tag alone,
