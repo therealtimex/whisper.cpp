@@ -141,9 +141,17 @@ jobs:
           mkdir -p electron-runtime
           cd electron-runtime
           npm install --no-save --no-audit --no-fund "electron@${ELECTRON_RUNTIME}" >/dev/null
-          electron="$(node -p "require('electron')")"
+          # Electron's package downloads its binary on the first require and
+          # prints "Downloading Electron binary..." to stdout: trigger that
+          # first, then read the path from a clean second call.
+          node -e "require('electron')" >/dev/null
+          electron="$(node -p "require('electron')" | tail -n 1)"
           if command -v cygpath >/dev/null 2>&1; then
             electron="$(cygpath -u "$electron")"
+          fi
+          if [ ! -e "$electron" ]; then
+            echo "::error::Electron binary not found at '$electron'"
+            exit 1
           fi
           if [ "${RUNNER_OS}" = "Linux" ] && ldd "$electron" | grep -q "not found"; then
             echo "::error::Electron is missing shared libraries:"
