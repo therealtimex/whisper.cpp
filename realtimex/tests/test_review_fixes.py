@@ -213,7 +213,8 @@ class SecondReviewTests(unittest.TestCase):
     def test_malformed_manifests_are_invalid_not_crashes(self):
         rel = release(FULL)
         for bad in ({"expectedAssetNames": "x"}, {"expectedAssetNames": [1, 2]},
-                    {"assets": "x"}, {"assets": ["x"]}):
+                    {"assets": "x"}, {"assets": ["x"]}, {"assets": 0}, {"assets": ""},
+                    {"assets": [{"name": ["not", "a", "string"]}]}, {"assets": None}):
             man = manifest()
             man.update(bad)
             state = ar.release_state(rel, man, release_tag=TAG, electron_version=E, upstream_sha=SHA)

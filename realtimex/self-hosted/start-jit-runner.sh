@@ -44,8 +44,12 @@ fi
 # A PID may be reused: the owner is live only if that PID runs our supervisor.
 supervisor_alive() {
   local cmd
-  cmd="$(ps -o command= -p "$1" 2>/dev/null || true)"
-  [[ "${cmd}" == *rtx-jit-supervise.sh* ]]
+  if cmd="$(ps -o command= -p "$1" 2>/dev/null)"; then
+    [[ "${cmd}" == *rtx-jit-supervise.sh* ]]
+    return
+  fi
+  # ps found nothing or failed: fail closed if the PID can still be signalled.
+  kill -0 "$1" 2>/dev/null
 }
 if [[ -e "${LOCK}" ]]; then
   first="$(head -1 "${LOCK}" 2>/dev/null || true)"

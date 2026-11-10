@@ -134,9 +134,10 @@ def release_state(
     # that lists fewer assets must not make a partial release look complete.
     expected = expected_asset_names(manifest_electron)
     listed = manifest.get("expectedAssetNames")
-    assets = manifest.get("assets") or []
+    assets = manifest.get("assets", [])
     if (listed is not None and not (isinstance(listed, list) and all(isinstance(n, str) for n in listed))) \
-            or not isinstance(assets, list) or not all(isinstance(a, dict) for a in assets):
+            or not isinstance(assets, list) \
+            or not all(isinstance(a, dict) and isinstance(a.get("name"), str) for a in assets):
         result.update(state=STATE_INVALID)
         result["reasons"].append("manifest-malformed")
         return result
