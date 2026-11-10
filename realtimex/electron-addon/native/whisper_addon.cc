@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <map>
@@ -69,6 +70,53 @@ static std::unique_ptr<whisper_context, WhisperContextDeleter> g_ctx;
 static std::unique_ptr<whisper_vad_context, WhisperVADDeleter> g_vad_ctx;
 static std::mutex g_mutex;
 static std::unique_ptr<audio::AudioPipeline> g_pipeline;
+
+// realtimex-ai-app#3238: free every whisper context before ggml's Metal
+// devices are destroyed at exit. ggml keeps its devices in function-local
+// statics that it builds on first backend use (inside whisper_init), after
+// this file's globals were constructed, so exit() destroys them first. A
+// context still alive at that point holds Metal buffers in the device's
+// residency set, ggml_metal_rsets_free hits
+// GGML_ASSERT([rsets->data count] == 0), and the app aborts as it quits.
+//
+// EnsureExitCleanup() registers an atexit handler after the first
+// successful whisper_init. Handlers and static destructors run in reverse
+// order of registration, so it runs before ggml's device destructors on
+// every exit() path: Electron's quit, process.exit(), a Node event loop that
+// ends. It is not a Node environment cleanup hook on purpose: these contexts
+// are process-wide, and a worker thread's teardown must not free them.
+void ReleaseAllContexts() {
+  std::vector<std::shared_ptr<WhisperSessionContext>> sessions;
+  {
+    std::lock_guard<std::mutex> lock(g_sessions_mutex);
+    for (auto &entry : g_sessions) {
+      sessions.push_back(entry.second);
+    }
+    g_sessions.clear();
+  }
+  for (auto &session : sessions) {
+    // Waits for a transcription in flight on this session.
+    std::lock_guard<std::mutex> lock(session->mutex);
+    session->pipeline.reset(); // holds a raw pointer to vad_ctx
+    session->vad_ctx.reset();
+    session->ctx.reset();
+  }
+  // Waits for a transcription in flight on the global context.
+  std::lock_guard<std::mutex> lock(g_mutex);
+  state = EngineState{};
+  g_pipeline.reset();
+  g_vad_ctx.reset();
+  g_ctx.reset();
+}
+
+void ReleaseAllContextsAtExit() { ReleaseAllContexts(); }
+
+std::once_flag g_exit_cleanup_once;
+
+void EnsureExitCleanup() {
+  std::call_once(g_exit_cleanup_once,
+                 [] { std::atexit(ReleaseAllContextsAtExit); });
+}
 
 inline bool IsTruthy(const Napi::Value &value) {
   if (value.IsBoolean())
@@ -250,6 +298,7 @@ Napi::Value Initialize(const Napi::CallbackInfo &info) {
       return env.Null();
     }
     g_ctx.reset(ctx);
+    EnsureExitCleanup();
 
     // Initialize Whisper VAD (Silero model)
     // If no VAD model path provided, use default (same directory as Whisper
@@ -306,6 +355,9 @@ Napi::Value Dispose(const Napi::CallbackInfo &info) {
   state = EngineState{};
   g_pipeline.reset();
   g_vad_ctx.reset();
+  // Free the model too (realtimex-ai-app#3238): dispose() used to keep it,
+  // with its Metal buffers, until exit.
+  g_ctx.reset();
 
   return info.Env().Undefined();
 }
@@ -386,6 +438,7 @@ Napi::Value InitializeSession(const Napi::CallbackInfo &info) {
     return env.Null();
   }
   session_ctx->ctx.reset(ctx);
+  EnsureExitCleanup();
 
   // Load VAD model if available
   if (vad_model_path.empty()) {
