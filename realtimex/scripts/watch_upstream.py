@@ -41,6 +41,7 @@ from addon_release import (  # noqa: E402
     DEFAULT_ELECTRON_VERSION,
     ELECTRON_VARIABLE,
     PACKAGING_REPO,
+    RUN_TITLE_PREFIX,
     STATE_COMPLETE,
     STATE_ELECTRON_MISMATCH,
     UPSTREAM_REPO,
@@ -93,6 +94,7 @@ def decide(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     rerun_window_hours: float = DEFAULT_RERUN_WINDOW_HOURS,
     ignore_backoff: bool = False,
+    watching_latest: bool = False,
 ) -> Dict[str, Any]:
     out: Dict[str, Any] = {"action": "none", "reason": "", "runId": None, "runUrl": None, "runAttempt": None}
     title = run_title(upstream_ref, release_tag, publish=True)
@@ -111,9 +113,21 @@ def decide(
             out["reason"] = f"paused:{name}={workflow_states.get(name) or 'missing'}"
             return out
 
-    matching = [r for r in runs if r.get("display_title") == title]
+    # A publish run dispatched with an empty release_tag is titled without the
+    # tag; it targets the default tag, so it counts for that target too.
+    titles = {title}
+    if release_tag == default_release_tag(upstream_ref):
+        titles.add(f"{RUN_TITLE_PREFIX} {upstream_ref}")
+    matching = [r for r in runs if r.get("display_title") in titles]
     matching.sort(key=lambda r: r.get("created_at") or "", reverse=True)
     active = next((r for r in matching if r.get("status") != "completed"), None)
+    if active is None and watching_latest and release_tag == default_release_tag(upstream_ref):
+        # A publish run dispatched with neither ref nor tag builds the latest
+        # upstream release, which is this target. Its title doesn't say which
+        # ref it resolved, so it only counts while it runs, not as an attempt.
+        latest_title = f"{RUN_TITLE_PREFIX} latest-upstream"
+        active = next((r for r in runs if r.get("display_title") == latest_title
+                       and r.get("status") != "completed"), None)
     if active is not None:
         out.update(reason=f"in-flight:{active.get('status')}", runId=active.get("id"), runUrl=active.get("html_url"))
         return out
@@ -184,6 +198,7 @@ def watch(gh: GitHub, args: argparse.Namespace, now: Optional[datetime] = None) 
         max_attempts=args.max_attempts,
         rerun_window_hours=args.rerun_window_hours,
         ignore_backoff=args.ignore_backoff,
+        watching_latest=not (args.force_ref or "").strip(),
     )
     return {
         "checkedAt": format_time(now),

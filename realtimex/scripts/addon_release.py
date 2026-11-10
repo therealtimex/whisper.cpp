@@ -117,6 +117,8 @@ def release_state(
         ]
         return result
 
+    if manifest is not None and not isinstance(manifest, dict):
+        manifest = None
     if MANIFEST_NAME not in published or manifest is None:
         result.update(state=STATE_INVALID)
         result["reasons"].append("manifest-missing-or-unreadable")
@@ -128,8 +130,26 @@ def release_state(
         return result
 
     manifest_electron = str(manifest.get("electronRuntimeVersion") or "")
-    expected = list(manifest.get("expectedAssetNames") or expected_asset_names(manifest_electron))
-    recorded = {a.get("name") for a in manifest.get("assets") or []}
+    # The release matrix is fixed here, not read from the manifest: a manifest
+    # that lists fewer assets must not make a partial release look complete.
+    expected = expected_asset_names(manifest_electron)
+    listed = manifest.get("expectedAssetNames")
+    assets = manifest.get("assets", [])
+    if (listed is not None and not (isinstance(listed, list) and all(isinstance(n, str) for n in listed))) \
+            or not isinstance(assets, list) \
+            or not all(isinstance(a, dict) and isinstance(a.get("name"), str) for a in assets):
+        result.update(state=STATE_INVALID)
+        result["reasons"].append("manifest-malformed")
+        return result
+    if listed is not None and sorted(listed) != sorted(expected):
+        result.update(state=STATE_INVALID)
+        result["reasons"].append("manifest-expected-assets-differ-from-matrix")
+        return result
+    if manifest.get("complete") is False or manifest.get("problems"):
+        result.update(state=STATE_INVALID)
+        result["reasons"].append("manifest-reports-incomplete-or-problems")
+        return result
+    recorded = {a.get("name") for a in assets}
     missing = sorted(n for n in expected if n not in published or n not in recorded)
     result["missingAssets"] = missing
 
@@ -153,6 +173,11 @@ class GitHubError(RuntimeError):
     def __init__(self, status: int, url: str, body: str = ""):
         super().__init__(f"GitHub API {status} for {url}: {body[:200]}")
         self.status = status
+        self.body = body
+
+    @property
+    def rate_limited(self) -> bool:
+        return self.status in (403, 429) and "rate limit" in self.body.lower()
 
 
 class GitHub:
@@ -266,18 +291,34 @@ class GitHub:
         wf = self.get_or_none(f"repos/{repo}/actions/workflows/{workflow_file}")
         return wf.get("state") if wf else None
 
-    def workflow_runs(self, repo: str, workflow_file: str, limit: int = 100) -> List[Dict[str, Any]]:
-        data = self.get(
-            f"repos/{repo}/actions/workflows/{workflow_file}/runs",
-            {"event": "workflow_dispatch", "per_page": min(limit, 100)},
-        )
-        return list(data.get("workflow_runs") or [])
+    def workflow_runs(self, repo: str, workflow_file: str, limit: int = 300) -> List[Dict[str, Any]]:
+        """The newest `limit` workflow_dispatch runs (paginated)."""
+        runs: List[Dict[str, Any]] = []
+        page = 1
+        while len(runs) < limit:
+            data = self.get(
+                f"repos/{repo}/actions/workflows/{workflow_file}/runs",
+                {"event": "workflow_dispatch", "per_page": 100, "page": page},
+            )
+            batch = list(data.get("workflow_runs") or [])
+            runs.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        return runs[:limit]
 
     def variable(self, repo: str, name: str) -> Optional[str]:
+        """A repository variable, or None if this token may not read it
+        (GITHUB_TOKEN can't). Other errors raise: a transient failure must
+        not silently pick a default Electron version for an immutable release."""
         try:
             data = self.get_or_none(f"repos/{repo}/actions/variables/{name}")
-        except GitHubError:
-            return None  # GITHUB_TOKEN cannot read variables; callers fall back.
+        except GitHubError as err:
+            # 403 is also GitHub's rate-limit answer: that must not look like
+            # "this token may not read variables".
+            if err.status in (401, 403) and not err.rate_limited:
+                return None
+            raise
         return data.get("value") if data else None
 
 

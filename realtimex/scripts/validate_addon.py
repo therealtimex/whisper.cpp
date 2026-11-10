@@ -46,16 +46,22 @@ PE_MACHINE = {0x8664: "x64", 0xAA64: "arm64"}
 LC_VERSION_MIN_MACOSX = 0x24
 LC_BUILD_VERSION = 0x32
 
-WEAK_NAPI_MACHO = re.compile(r"\bweak external (__ZN4Napi\S*)")
-WEAK_NAPI_ELF = re.compile(r"^\S*\s+[WV]\s+(_ZN4Napi\S*)", re.MULTILINE)
+# Itanium mangling puts CV and ref qualifiers of a member function after
+# `N`: a const method is __ZNK4Napi..., so match the optional qualifiers too.
+WEAK_NAPI_MACHO = re.compile(r"\bweak external (__ZN[rVKRO]*4Napi\S*)")
+WEAK_NAPI_ELF = re.compile(r"^\S*\s+[WV]\s+(_ZN[rVKRO]*4Napi\S*)", re.MULTILINE)
+PLATFORM_MACOS = 1
 
 
 def _version(encoded: int) -> str:
     return f"{encoded >> 16}.{(encoded >> 8) & 0xFF}.{encoded & 0xFF}"
 
 
-def macho_slices(data: bytes) -> List[Tuple[str, Optional[str]]]:
-    """Return (arch, minos) for each Mach-O slice (one for thin binaries)."""
+def macho_slices(data: bytes) -> List[Tuple[str, Optional[str], Optional[int]]]:
+    """Return (arch, minos, platform) for each Mach-O slice (one for thin binaries).
+
+    `platform` is the LC_BUILD_VERSION platform (1 = macOS), or 1 for an old
+    LC_VERSION_MIN_MACOSX binary, or None when neither command is present."""
     if len(data) < 32:
         raise ValueError("file too small for Mach-O")
     (magic_be,) = struct.unpack_from(">I", data, 0)
@@ -72,23 +78,27 @@ def macho_slices(data: bytes) -> List[Tuple[str, Optional[str]]]:
     _magic, cputype, _sub, _filetype, ncmds, _size, _flags, _res = struct.unpack_from("<IiiIIIII", data, 0)
     arch = MACHO_CPU.get(cputype & 0xFFFFFFFF, f"cpu-{cputype:#x}")
     minos: Optional[str] = None
+    platform: Optional[int] = None
     offset = 32
     for _ in range(ncmds):
         cmd, cmdsize = struct.unpack_from("<II", data, offset)
         if cmd == LC_BUILD_VERSION:
-            _platform, encoded, _sdk = struct.unpack_from("<III", data, offset + 8)
+            platform, encoded, _sdk = struct.unpack_from("<III", data, offset + 8)
             minos = _version(encoded)
         elif cmd == LC_VERSION_MIN_MACOSX and minos is None:
             (encoded,) = struct.unpack_from("<I", data, offset + 8)
             minos = _version(encoded)
+            platform = PLATFORM_MACOS
         if cmdsize <= 0:
             raise ValueError("corrupt Mach-O load command")
         offset += cmdsize
-    return [(arch, minos)]
+    return [(arch, minos, platform)]
 
 
 def binary_info(data: bytes) -> Dict[str, Any]:
     if data[:4] == b"\x7fELF":
+        if len(data) < 20:
+            raise ValueError("ELF header is truncated")
         if data[4] != 2:
             raise ValueError("ELF is not 64-bit")
         endian = "<" if data[5] == 1 else ">"
@@ -101,7 +111,12 @@ def binary_info(data: bytes) -> Dict[str, Any]:
         (machine,) = struct.unpack_from("<H", data, pe_offset + 4)
         return {"format": "pe", "archs": [PE_MACHINE.get(machine, f"machine-{machine:#x}")]}
     slices = macho_slices(data)
-    return {"format": "macho", "archs": [a for a, _ in slices], "minos": [m for _, m in slices]}
+    return {
+        "format": "macho",
+        "archs": [a for a, _, _ in slices],
+        "minos": [m for _, m, _ in slices],
+        "platforms": [p for _, _, p in slices],
+    }
 
 
 def weak_napi_exports(nm_output: str, fmt: str) -> List[str]:
@@ -155,6 +170,9 @@ def validate(
         except ValueError as err:
             errors.append(f"metadata is not JSON: {err}")
             return report
+        if not isinstance(metadata, dict):
+            errors.append(f"metadata is {type(metadata).__name__}, not a JSON object")
+            return report
 
     wanted = {"asset": expected_name, "platform": platform, "arch": arch, "electronRuntimeVersion": electron_version}
     if upstream_sha:
@@ -179,6 +197,9 @@ def validate(
         errors.append(f"binary architectures {info['archs']} != [{arch!r}]")
 
     if info["format"] == "macho":
+        for platform_id in info.get("platforms") or [None]:
+            if platform_id != PLATFORM_MACOS:
+                errors.append(f"Mach-O platform {platform_id} is not macOS ({PLATFORM_MACOS})")
         for minos in info.get("minos") or [None]:
             if minos is None:
                 errors.append("no minimum macOS version load command")

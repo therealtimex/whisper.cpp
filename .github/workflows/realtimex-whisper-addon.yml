@@ -53,7 +53,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: realtimex-whisper-addon-${{ inputs.release_tag || inputs.upstream_ref || 'latest-upstream' }}
+  # Keyed by the release tag, defaulted like resolve-upstream does, so runs
+  # for the same tag queue behind each other whether or not it was given.
+  group: realtimex-whisper-addon-${{ inputs.release_tag || (inputs.upstream_ref && format('realtimex-{0}', inputs.upstream_ref)) || 'latest-upstream' }}
   cancel-in-progress: false
 
 env:
@@ -105,6 +107,17 @@ jobs:
           fi
           upstream_sha="$(gh api "repos/ggml-org/whisper.cpp/commits/${upstream_ref}" --jq '.sha')"
           release_tag="$(printf '%s' "${RAW_RELEASE_TAG}" | tr -d '[:space:]')"
+          # The concurrency group is keyed by the raw inputs, which can't be
+          # normalized in an expression: refuse inputs whose default tag would
+          # differ from that key, so two runs for one tag always share a group.
+          if [ "$RAW_UPSTREAM_REF" != "$upstream_ref" ] && [ -n "$RAW_UPSTREAM_REF" ] || [ "$RAW_RELEASE_TAG" != "$release_tag" ]; then
+            echo "::error::upstream_ref and release_tag must not contain spaces"
+            exit 1
+          fi
+          if [ -z "$release_tag" ] && [ -n "$RAW_UPSTREAM_REF" ] && [[ "$upstream_ref" == *[/:@]* ]]; then
+            echo "::error::upstream_ref '${upstream_ref}' contains / : or @; pass release_tag explicitly"
+            exit 1
+          fi
           if [ -z "$release_tag" ]; then
             safe_upstream_ref="$(printf '%s' "$upstream_ref" | tr '/:@' '---')"
             release_tag="realtimex-${safe_upstream_ref}"
@@ -342,6 +355,24 @@ jobs:
             --upstream-sha "${UPSTREAM_SHA}" \
             --require-assemblable)"
           state="$(jq -r '.state' <<< "$state_json")"
+
+          # GitHub ignores --target once the tag exists: a leftover tag would
+          # publish this release at an older packaging commit.
+          ref_err="$(mktemp)"
+          if ref_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" 2>"$ref_err")"; then
+            tag_sha="$(jq -r '.object.sha' <<< "$ref_json")"
+            if [ "$(jq -r '.object.type' <<< "$ref_json")" = "tag" ]; then
+              tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq '.object.sha')"
+            fi
+            if [ "$tag_sha" != "${GITHUB_SHA}" ]; then
+              echo "::error::Tag ${RELEASE_TAG} already exists at ${tag_sha}, not this build's commit ${GITHUB_SHA}; use a new release_tag"
+              exit 1
+            fi
+          elif ! grep -q 'HTTP 404' "$ref_err"; then
+            # Only "no such tag" may pass; any other error fails closed.
+            echo "::error::Could not check tag ${RELEASE_TAG}: $(cat "$ref_err")"
+            exit 1
+          fi
 
           title="RealTimeX Whisper Addon ${RELEASE_TAG}"
           notes="$(mktemp)"
