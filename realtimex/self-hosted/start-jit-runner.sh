@@ -11,7 +11,8 @@
 # installed in ~/actions-runner (no service, no stored registration). It:
 #   - refuses while ~/QA-LOCK is held (a QA round is using this account) or a
 #     runner is already running; a lock left by this script's own supervisor
-#     that is no longer running (killed, or the Mac restarted) is reclaimed,
+#     that is no longer running (killed, or the Mac restarted; checked by PID
+#     and command, so a reused PID doesn't count) is reclaimed atomically,
 #     any other lock is left alone;
 #   - has the supervisor take ~/QA-LOCK atomically, with its PID, for the
 #     whole build, so QA waits for it;
@@ -40,12 +41,30 @@ if pgrep -U "$(id -u)" -f "${RUNNER_DIR}/bin/Runner.Listener" >/dev/null; then
   echo "refused: a runner is already running in ${RUNNER_DIR}"
   exit 3
 fi
+# A PID may be reused: the owner is live only if that PID runs our supervisor.
+supervisor_alive() {
+  local cmd
+  cmd="$(ps -o command= -p "$1" 2>/dev/null || true)"
+  [[ "${cmd}" == *rtx-jit-supervise.sh* ]]
+}
 if [[ -e "${LOCK}" ]]; then
   first="$(head -1 "${LOCK}" 2>/dev/null || true)"
   owner="$(sed -n 's/.* pid \([0-9][0-9]*\).*/\1/p' <<<"${first}")"
-  if [[ "${first}" == "${MARK}"* && -n "${owner}" ]] && ! kill -0 "${owner}" 2>/dev/null; then
-    echo "reclaimed: stale QA-LOCK from supervisor pid ${owner}, which is no longer running"
-    rm -f "${LOCK}"
+  if [[ "${first}" == "${MARK}"* && -n "${owner}" ]] && ! supervisor_alive "${owner}"; then
+    # Reclaim atomically: move the file aside, then check it is still the
+    # stale lock inspected above. If it changed meanwhile, put it back.
+    aside="${LOCK}.reclaim.$$"
+    if ! mv "${LOCK}" "${aside}" 2>/dev/null; then
+      echo "refused: QA-LOCK changed while reclaiming"
+      exit 3
+    fi
+    if [[ "$(head -1 "${aside}" 2>/dev/null || true)" != "${first}" ]]; then
+      mv -n "${aside}" "${LOCK}" || echo "warning: could not restore ${aside} to ${LOCK}"
+      echo "refused: QA-LOCK changed while reclaiming"
+      exit 3
+    fi
+    rm -f "${aside}"
+    echo "reclaimed: stale QA-LOCK (its supervisor, pid ${owner}, is gone)"
   else
     echo "refused: QA-LOCK held: $(head -c 160 "${LOCK}")"
     exit 3

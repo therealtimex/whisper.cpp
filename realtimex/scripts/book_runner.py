@@ -63,16 +63,23 @@ def decide(queued_jobs: List[Dict[str, Any]], runners: List[Dict[str, Any]], lab
     return plan
 
 
-def unfinished_runs(gh: GitHub, repo: str, workflow: str, max_pages: int = 5) -> List[Dict[str, Any]]:
+def unfinished_runs(gh: GitHub, repo: str, workflow: str, max_pages: int = 50) -> List[Dict[str, Any]]:
+    """Every queued or in-progress run (until a short page; max_pages is only
+    a runaway guard, and hitting it is reported)."""
     runs: List[Dict[str, Any]] = []
     for status in ("queued", "in_progress"):
-        for page in range(1, max_pages + 1):
+        page = 1
+        while True:
             data = gh.get(f"repos/{repo}/actions/workflows/{workflow}/runs",
                           {"status": status, "per_page": 100, "page": page})
             batch = list(data.get("workflow_runs") or [])
             runs.extend(batch)
             if len(batch) < 100:
                 break
+            if page >= max_pages:
+                print(f"warning: more than {max_pages * 100} {status} runs; later ones not checked", file=sys.stderr)
+                break
+            page += 1
     return runs
 
 

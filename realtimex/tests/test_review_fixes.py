@@ -22,9 +22,8 @@ import book_runner as br  # noqa: E402
 import release_state  # noqa: E402
 import validate_addon  # noqa: E402
 import watch_upstream as wu  # noqa: E402
-from test_release import (  # noqa: E402
-    ACTIVE, E, HEAD, NOW, SHA, TAG, FULL, PackageAndValidateTests, elf, manifest, pe, release, ts,
-)
+import test_release as tr  # noqa: E402
+from test_release import ACTIVE, E, FULL, HEAD, NOW, SHA, TAG, elf, manifest, pe, release, ts  # noqa: E402
 
 
 def macho_platform(cputype, platform, minos=(13, 0, 0)):
@@ -47,11 +46,12 @@ class SixAssetContractTests(unittest.TestCase):
 
 
 class ValidatorReviewTests(unittest.TestCase):
-    # Reuse the helpers only; inheriting would run that class's tests twice.
-    setUp = PackageAndValidateTests.setUp
-    tearDown = PackageAndValidateTests.tearDown
-    pack = PackageAndValidateTests.pack
-    validate = PackageAndValidateTests.validate
+    # Reached through the module: a TestCase class imported by name would be
+    # collected and run a second time from this module.
+    setUp = tr.PackageAndValidateTests.setUp
+    tearDown = tr.PackageAndValidateTests.tearDown
+    pack = tr.PackageAndValidateTests.pack
+    validate = tr.PackageAndValidateTests.validate
 
     def test_good_mac_x64(self):
         report = self.validate(self.pack("mac", "x64", macho_platform(0x01000007, 1)), "mac", "x64")
@@ -197,6 +197,48 @@ class PaginationTests(unittest.TestCase):
         gh.get = get
         self.assertEqual(len(gh.workflow_runs("o/r", "w.yml")), 207)
         self.assertEqual(calls, [1, 2, 3])
+
+
+
+class SecondReviewTests(unittest.TestCase):
+    def test_rate_limited_403_raises(self):
+        gh = ar.GitHub(token="x")
+
+        def limited(path, params=None):
+            raise ar.GitHubError(403, path, '{"message":"API rate limit exceeded for user"}')
+        gh.get = limited
+        with self.assertRaises(ar.GitHubError):
+            gh.variable("o/r", "V")
+
+    def test_malformed_manifests_are_invalid_not_crashes(self):
+        rel = release(FULL)
+        for bad in ({"expectedAssetNames": "x"}, {"expectedAssetNames": [1, 2]},
+                    {"assets": "x"}, {"assets": ["x"]}):
+            man = manifest()
+            man.update(bad)
+            state = ar.release_state(rel, man, release_tag=TAG, electron_version=E, upstream_sha=SHA)
+            self.assertEqual(state["state"], ar.STATE_INVALID, bad)
+        state = ar.release_state(rel, ["not", "a", "dict"], release_tag=TAG, electron_version=E)
+        self.assertEqual(state["state"], ar.STATE_INVALID)
+
+    def run_(self, title, status):
+        return {"id": 3, "display_title": title, "status": status, "conclusion": None, "run_attempt": 1,
+                "head_sha": HEAD, "created_at": ts(1), "updated_at": ts(1), "html_url": "x"}
+
+    def decide(self, runs, watching_latest):
+        return wu.decide(upstream_ref="v1.9.5", release_tag=TAG, state={"state": ar.STATE_ABSENT},
+                         workflow_states=ACTIVE, runs=runs, packaging_sha=HEAD, now=NOW,
+                         watching_latest=watching_latest)
+
+    def test_latest_upstream_run_in_flight_blocks_a_duplicate(self):
+        runs = [self.run_("RealTimeX Whisper Addon latest-upstream", "in_progress")]
+        self.assertEqual(self.decide(runs, True)["reason"], "in-flight:in_progress")
+
+    def test_latest_upstream_run_ignored_when_ref_is_forced_or_finished(self):
+        self.assertEqual(self.decide([self.run_("RealTimeX Whisper Addon latest-upstream", "in_progress")],
+                                     False)["action"], "dispatch")
+        self.assertEqual(self.decide([self.run_("RealTimeX Whisper Addon latest-upstream", "completed")],
+                                     True)["action"], "dispatch")
 
 
 if __name__ == "__main__":

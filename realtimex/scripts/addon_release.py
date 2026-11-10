@@ -117,6 +117,8 @@ def release_state(
         ]
         return result
 
+    if manifest is not None and not isinstance(manifest, dict):
+        manifest = None
     if MANIFEST_NAME not in published or manifest is None:
         result.update(state=STATE_INVALID)
         result["reasons"].append("manifest-missing-or-unreadable")
@@ -132,6 +134,12 @@ def release_state(
     # that lists fewer assets must not make a partial release look complete.
     expected = expected_asset_names(manifest_electron)
     listed = manifest.get("expectedAssetNames")
+    assets = manifest.get("assets") or []
+    if (listed is not None and not (isinstance(listed, list) and all(isinstance(n, str) for n in listed))) \
+            or not isinstance(assets, list) or not all(isinstance(a, dict) for a in assets):
+        result.update(state=STATE_INVALID)
+        result["reasons"].append("manifest-malformed")
+        return result
     if listed is not None and sorted(listed) != sorted(expected):
         result.update(state=STATE_INVALID)
         result["reasons"].append("manifest-expected-assets-differ-from-matrix")
@@ -140,7 +148,7 @@ def release_state(
         result.update(state=STATE_INVALID)
         result["reasons"].append("manifest-reports-incomplete-or-problems")
         return result
-    recorded = {a.get("name") for a in manifest.get("assets") or []}
+    recorded = {a.get("name") for a in assets}
     missing = sorted(n for n in expected if n not in published or n not in recorded)
     result["missingAssets"] = missing
 
@@ -164,6 +172,11 @@ class GitHubError(RuntimeError):
     def __init__(self, status: int, url: str, body: str = ""):
         super().__init__(f"GitHub API {status} for {url}: {body[:200]}")
         self.status = status
+        self.body = body
+
+    @property
+    def rate_limited(self) -> bool:
+        return self.status in (403, 429) and "rate limit" in self.body.lower()
 
 
 class GitHub:
@@ -300,7 +313,9 @@ class GitHub:
         try:
             data = self.get_or_none(f"repos/{repo}/actions/variables/{name}")
         except GitHubError as err:
-            if err.status in (401, 403):
+            # 403 is also GitHub's rate-limit answer: that must not look like
+            # "this token may not read variables".
+            if err.status in (401, 403) and not err.rate_limited:
                 return None
             raise
         return data.get("value") if data else None
